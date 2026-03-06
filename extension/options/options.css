@@ -1,0 +1,174 @@
+:root {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  font: 14px/1.45 "Segoe UI", Tahoma, sans-serif;
+  color: #1f2328;
+  background: #eef2f8;
+}
+
+.wrap {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 24px 16px 36px;
+  display: grid;
+  gap: 14px;
+}
+
+h1,
+h2 {
+  margin: 0 0 6px;
+}
+
+p {
+  margin: 0;
+}
+
+.card {
+  background: #fff;
+  border: 1px solid #d2dae4;
+  border-radius: 10px;
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+}
+
+.field span {
+  color: #4b5563;
+}
+
+input,
+select,
+button {
+  font: inherit;
+}
+
+input,
+select {
+  border: 1px solid #c6d0de;
+  border-radius: 7px;
+  padding: 8px 10px;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+button {
+  border: 1px solid #2b6edf;
+  border-radius: 8px;
+  padding: 7px 12px;
+  background: #2f7af0;
+  color: #fff;
+  cursor: pointer;
+}
+
+button.alt {
+  border-color: #97a7bf;
+  background: #fff;
+  color: #233146;
+}
+
+.status {
+  min-height: 20px;
+}
+
+pre {
+  margin: 0;
+  background: #f6f8fb;
+  border: 1px solid #dbe2ec;
+  border-radius: 8px;
+  padding: 8px;
+  overflow: auto;
+  max-height: 280px;
+}
+
+.diag-health {
+  border: 1px solid #dbe2ec;
+  border-radius: 8px;
+  background: #f6f8fb;
+  padding: 8px 10px;
+  color: #1f2328;
+}
+
+.diag-health.ok {
+  border-color: #9ad6b5;
+  background: #eefaf3;
+  color: #0f5132;
+}
+
+.diag-health.warn {
+  border-color: #f3c97a;
+  background: #fff8e9;
+  color: #7a4f01;
+}
+
+.diag-health.empty {
+  border-color: #dbe2ec;
+  background: #f6f8fb;
+  color: #4b5563;
+}
+
+.diag-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.diag-kpi {
+  border: 1px solid #dbe2ec;
+  border-radius: 8px;
+  background: #f9fbff;
+  padding: 8px 10px;
+}
+
+.diag-kpi__label {
+  font-size: 12px;
+  color: #4b5563;
+}
+
+.diag-kpi__value {
+  margin-top: 2px;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.diag-block {
+  display: grid;
+  gap: 6px;
+}
+
+.diag-block h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.diag-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.diag-list li {
+  border: 1px solid #dbe2ec;
+  border-radius: 8px;
+  background: #fbfcfe;
+  padding: 7px 9px;
+}
+
+.diag-list li.empty {
+  color: #667085;
+  background: #f6f8fb;
+}

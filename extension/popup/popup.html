@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OWB Tools</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="app">
+    <header class="head">
+      <img src="../icons/icon32.png" alt="" width="24" height="24">
+      <h1>OWB Tools</h1>
+    </header>
+
+    <p class="note">Настройки применяются к текущей вкладке Ozon/WB.</p>
+
+    <label class="field">
+      <span>Режим</span>
+      <select id="mode">
+        <option value="local">Local-only</option>
+        <option value="sync">Sync</option>
+      </select>
+    </label>
+
+    <label class="field">
+      <span>Server URL</span>
+      <input id="serverUrl" type="text" spellcheck="false" placeholder="http://127.0.0.1:8765">
+    </label>
+
+    <div class="actions">
+      <button id="saveBtn" type="button">Сохранить</button>
+      <button id="syncBtn" type="button" class="alt">Sync now</button>
+    </div>
+
+    <section class="status">
+      <p id="statusLine" class="status-line">Загрузка статуса...</p>
+      <p id="metaLine" class="meta-line"></p>
+    </section>
+
+    <section id="quickChart" class="chart-card" hidden>
+      <p id="chartTitle" class="chart-title">График текущего товара</p>
+      <p id="chartMeta" class="meta-line"></p>
+      <canvas id="chartCanvas" width="296" height="120"></canvas>
+      <p id="chartHint" class="meta-line"></p>
+      <button id="resetProductBtn" type="button" class="danger" hidden>Сбросить историю товара</button>
+    </section>
+
+    <button id="openOptionsBtn" class="link-btn" type="button">Открыть настройки расширения</button>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

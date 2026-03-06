@@ -1,0 +1,56 @@
+# --- OS / Editors ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- Python (server) ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# --- Server runtime / local data ---
+server/*.sqlite
+server/*.sqlite3
+server/*.db
+server/*.db-*
+server/*.log
+server/*.pid
+server/.env
+server/.env.*
+
+# --- Extension build artifacts ---
+extension/node_modules/
+extension/dist/
+extension/build/
+extension/.parcel-cache/
+extension/.cache/
+extension/web-ext-artifacts/
+extension/*.crx
+extension/*.pem
+extension/*.zip
+extension/.env
+extension/.env.*
+
+# --- Generic archives ---
+*.zip
+*.tar
+*.tar.gz
+*.7z

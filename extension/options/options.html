@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OWB Tools Options</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <h1>OWB Tools: настройки</h1>
+      <p>Эти значения используются как дефолт при первом запуске контент-скрипта на домене.</p>
+    </header>
+
+    <section class="card">
+      <label class="field">
+        <span>Default mode</span>
+        <select id="defaultMode">
+          <option value="local">local</option>
+          <option value="sync">sync</option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span>Default server URL</span>
+        <input id="defaultUrl" type="text" spellcheck="false" placeholder="http://127.0.0.1:8765">
+      </label>
+
+      <div class="actions">
+        <button id="saveBtn" type="button">Сохранить дефолты</button>
+        <button id="applyBtn" type="button" class="alt">Применить к активной вкладке</button>
+      </div>
+
+      <p id="status" class="status"></p>
+    </section>
+
+    <section class="card">
+      <h2>История цен: backup</h2>
+      <p>Экспорт/импорт всей базы расширения.</p>
+      <div class="actions">
+        <button id="exportBtn" type="button">Экспорт истории</button>
+        <button id="importBtn" type="button" class="alt">Импорт истории</button>
+      </div>
+      <input id="importFile" type="file" accept="application/json,.json" hidden>
+    </section>
+
+    <section class="card">
+      <h2>Диагностика БД</h2>
+      <p>Сводка подтягивается автоматически при открытии страницы.</p>
+      <p id="inspectMeta" class="status">Загрузка данных…</p>
+      <div id="inspectHealth" class="diag-health">Проверка состояния базы…</div>
+
+      <div class="diag-grid">
+        <div class="diag-kpi">
+          <div class="diag-kpi__label">Товаров</div>
+          <div id="inspectTotalProducts" class="diag-kpi__value">—</div>
+        </div>
+        <div class="diag-kpi">
+          <div class="diag-kpi__label">Интервалов</div>
+          <div id="inspectTotalIntervals" class="diag-kpi__value">—</div>
+        </div>
+        <div class="diag-kpi">
+          <div class="diag-kpi__label">Ср. интервалов/товар</div>
+          <div id="inspectAvgPerProduct" class="diag-kpi__value">—</div>
+        </div>
+      </div>
+
+      <div class="diag-block">
+        <h3>По маркетплейсам</h3>
+        <ul id="inspectMarkets" class="diag-list"></ul>
+      </div>
+
+      <div class="diag-block">
+        <h3>Последние товары</h3>
+        <ul id="inspectProductsList" class="diag-list"></ul>
+      </div>
+
+      <div class="diag-block">
+        <h3>Последние интервалы цен</h3>
+        <ul id="inspectIntervalsList" class="diag-list"></ul>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Локальный сервер</h2>
+      <p>Для sync-режима поднимите ваш сервер из папки Tamper-проекта:</p>
+      <pre><code>python local_price_server.py</code></pre>
+      <p>По умолчанию используется <code>http://127.0.0.1:8765</code>.</p>
+    </section>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>
