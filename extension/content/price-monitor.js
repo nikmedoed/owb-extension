@@ -378,10 +378,12 @@ const CFG = {
     const isBadgeCardCandidate = (card, market) => {
         if (!card || !card.isConnected) return false;
         const rect = card.getBoundingClientRect();
-        if ((rect.width || 0) < 120 || (rect.height || 0) < 120) return false;
+        const minSize = market === 'ozon' ? 90 : 120;
+        if ((rect.width || 0) < minSize || (rect.height || 0) < minSize) return false;
 
-        if (card.closest('#section-reviews, #section-questions, #product-feedbacks, [id*="reviews"], [id*="questions"]')) return false;
-        if (market === 'ozon' && card.closest('[data-widget*="review" i], [data-widget*="question" i], [data-widget*="variant" i]')) return false;
+        const inOzonSkuGrid = market === 'ozon' && !!card.closest('[data-widget="skuGrid"]');
+        if (!inOzonSkuGrid && card.closest('#section-reviews, #section-questions, #product-feedbacks, [id*="reviews"], [id*="questions"]')) return false;
+        if (market === 'ozon' && !inOzonSkuGrid && card.closest('[data-widget*="review" i], [data-widget*="question" i], [data-widget*="variant" i]')) return false;
         if (market === 'wb' && card.closest('[class*="review" i], [class*="feedback" i], [class*="question" i], .comments')) return false;
 
         const hasProductLink = !!card.querySelector('a[href*="/product/"], a[href*="/catalog/"][href*="/detail"]');
@@ -572,6 +574,21 @@ const CFG = {
                     };
                 }
             }
+            // Ozon often renders tile prices via headline typography (including skuGrid cards).
+            const headlineNodes = [...card.querySelectorAll('span[class*="tsHeadline"], div[class*="tsHeadline"]')];
+            let headlineBest = null;
+            for (const node of headlineNodes) {
+                const text = String(node.textContent || '').replace(/\s+/g, ' ').trim();
+                if (!text || !/\d/.test(text) || /%/.test(text)) continue;
+                if (/отзыв|шт\b|остал|рейтинг|балл/i.test(text)) continue;
+                if (!/[₽€$֏₸]/.test(text) && !/(^|\D)\d{2,}(\D|$)/.test(text)) continue;
+                const price = parsePriceValue(text);
+                if (!Number.isFinite(price)) continue;
+                const currency = detectCurrency(text) || detectCurrency(card.textContent || '') || '₽';
+                const cand = { price, currency, text };
+                if (!headlineBest || cand.price < headlineBest.price) headlineBest = cand;
+            }
+            if (headlineBest) return headlineBest;
             const info = findPriceInCard(card, { defaultCurrency: '₽' });
             return info && Number.isFinite(Number(info.price)) ? { price: Number(info.price), currency: info.currency || '₽', text: card.textContent || '' } : null;
         };
@@ -580,6 +597,7 @@ const CFG = {
                 market: 'ozon',
                 cardSelector: [
                     'div[class*="tile-root"]',
+                    '[data-widget="skuGrid"] [data-index]',
                     'article[class*="tile"]',
                     'div[data-sku][class*="tile"]',
                     '[data-widget="cartSplit"] .checkout_r9',
