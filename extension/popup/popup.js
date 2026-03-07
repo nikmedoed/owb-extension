@@ -1,9 +1,5 @@
 'use strict';
 
-const modeEl = document.getElementById('mode');
-const serverUrlEl = document.getElementById('serverUrl');
-const saveBtn = document.getElementById('saveBtn');
-const syncBtn = document.getElementById('syncBtn');
 const statusLineEl = document.getElementById('statusLine');
 const metaLineEl = document.getElementById('metaLine');
 const openOptionsBtn = document.getElementById('openOptionsBtn');
@@ -13,6 +9,13 @@ const chartMetaEl = document.getElementById('chartMeta');
 const chartCanvasEl = document.getElementById('chartCanvas');
 const chartHintEl = document.getElementById('chartHint');
 const resetProductBtn = document.getElementById('resetProductBtn');
+const batchDownloadBtn = document.getElementById('batchDownloadBtn');
+const batchDownloadAllBtn = document.getElementById('batchDownloadAllBtn');
+const batchCopyBtn = document.getElementById('batchCopyBtn');
+const batchCopyAllBtn = document.getElementById('batchCopyAllBtn');
+const batchMetaLineEl = document.getElementById('batchMetaLine');
+const lastSessionTextEl = document.getElementById('lastSessionText');
+const copyLastSessionBtn = document.getElementById('copyLastSessionBtn');
 
 const MARKET_HOST_RE = /(^|\.)((ozon\.(ru|com|kz|by|uz|am|kg|ge))|(wildberries\.(ru|by|kz|uz|am|kg|ge))|(wb\.ru))$/i;
 let currentProduct = null;
@@ -58,24 +61,67 @@ const updateResetButtonState = (busy = false) => {
 };
 
 const withBusy = (busy) => {
-    saveBtn.disabled = busy;
-    syncBtn.disabled = busy;
-    modeEl.disabled = busy;
-    serverUrlEl.disabled = busy;
+    if (batchDownloadBtn) batchDownloadBtn.disabled = busy;
+    if (batchDownloadAllBtn) batchDownloadAllBtn.disabled = busy;
+    if (batchCopyBtn) batchCopyBtn.disabled = busy;
+    if (batchCopyAllBtn) batchCopyAllBtn.disabled = busy;
+    if (copyLastSessionBtn) copyLastSessionBtn.disabled = busy;
     updateResetButtonState(busy);
 };
 
+const setBatchMeta = (text) => {
+    if (!batchMetaLineEl) return;
+    batchMetaLineEl.textContent = String(text || '');
+};
 const setStatus = (line, meta = '', isError = false) => {
-    statusLineEl.textContent = line;
-    metaLineEl.textContent = meta;
-    statusLineEl.style.color = isError ? '#b42318' : '#1f2328';
+    const text = String(line || '');
+    const details = String(meta || '');
+    if (statusLineEl) {
+        statusLineEl.textContent = text;
+        statusLineEl.style.color = isError ? '#b42318' : '#1f2328';
+    }
+    if (metaLineEl) metaLineEl.textContent = details;
+    if (!statusLineEl && !metaLineEl) {
+        setBatchMeta([text, details].filter(Boolean).join(' · '));
+    }
+};
+const copyTextToClipboard = async (text) => {
+    const payload = String(text || '');
+    try {
+        await navigator.clipboard.writeText(payload);
+        return true;
+    } catch (_) {}
+    const ta = document.createElement('textarea');
+    ta.value = payload;
+    ta.setAttribute('readonly', 'readonly');
+    ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0;';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    if (!ok) throw new Error('Не удалось скопировать текст');
+    return true;
+};
+const renderLastSession = (session) => {
+    if (!lastSessionTextEl) return;
+    if (!session || typeof session !== 'object') {
+        lastSessionTextEl.value = '';
+        setBatchMeta('');
+        return;
+    }
+    const modeLabel = session.mode === 'copy' ? 'буфер' : 'файлы';
+    const whenText = session.createdAt ? new Date(Number(session.createdAt)).toLocaleString('ru-RU') : '';
+    const totals = `Успех: ${session.successCount || 0}/${session.totalTabs || 0}, ошибок: ${session.failCount || 0}`;
+    const extra = session.storedTruncated ? ' · текст в сессии обрезан' : '';
+    setBatchMeta([whenText, modeLabel, totals].filter(Boolean).join(' · ') + extra);
+    lastSessionTextEl.value = String(session.combinedText || session.text || '');
 };
 
 const callMonitor = async (action, payload = null) => {
     const actionMap = {
         'monitor:get-status': 'owb:price-get-status',
-        'monitor:set-config': 'owb:price-set-config',
-        'monitor:sync-now': 'owb:price-sync-now',
+        'batch:run-window-export': 'owb:batch-run-window-export',
+        'batch:get-last-session': 'owb:batch-get-last-session',
     };
     const type = actionMap[action];
     if (!type) throw new Error('Неизвестное действие');
@@ -90,10 +136,6 @@ const callMonitor = async (action, payload = null) => {
 
 const applyStatus = (status) => {
     if (!status || typeof status !== 'object') return;
-    if (status.mode) modeEl.value = status.mode;
-    if (status.serverUrl) serverUrlEl.value = status.serverUrl;
-    const reach = status.reachable ? 'online' : 'offline';
-    setStatus(`Mode: ${status.mode || 'local'} | ${reach}`, `Cursor: ${status.cursor ?? 0}`);
 };
 
 const getActiveTab = async () => {
@@ -175,7 +217,7 @@ const clearQuickChart = (title, meta, hint) => {
 
 const drawQuickChart = (points, currency) => {
     const width = Math.max(220, Math.floor(chartCanvasEl.clientWidth || 296));
-    const height = 120;
+    const height = 96;
     const dpr = window.devicePixelRatio || 1;
     chartCanvasEl.width = width * dpr;
     chartCanvasEl.height = height * dpr;
@@ -281,10 +323,8 @@ const loadQuickChart = async () => {
 
 const refreshStatus = async () => {
     withBusy(true);
-    setStatus('Чтение статуса...');
     try {
-        const status = await callMonitor('monitor:get-status');
-        applyStatus(status);
+        await callMonitor('monitor:get-status');
     } catch (err) {
         setStatus(String(err.message || err), '', true);
     } finally {
@@ -292,38 +332,91 @@ const refreshStatus = async () => {
     }
 };
 
-saveBtn.addEventListener('click', async () => {
-    withBusy(true);
-    setStatus('Сохраняю настройки...');
+const loadLastExportSession = async () => {
     try {
-        const status = await callMonitor('monitor:set-config', {
-            mode: modeEl.value,
-            url: serverUrlEl.value.trim(),
-        });
-        applyStatus(status);
-    } catch (err) {
-        setStatus(String(err.message || err), '', true);
-    } finally {
-        withBusy(false);
+        const session = await callMonitor('batch:get-last-session');
+        renderLastSession(session || null);
+    } catch (_) {
+        renderLastSession(null);
     }
-});
+};
 
-syncBtn.addEventListener('click', async () => {
+const runWindowBatchExport = async (options = {}) => {
+    const allReviews = options.allReviews === true;
+    const mode = options.mode === 'copy' ? 'copy' : 'download';
+    const activeTab = await getActiveTab();
+    const windowId = activeTab && Number.isFinite(Number(activeTab.windowId)) ? Number(activeTab.windowId) : null;
+
     withBusy(true);
-    setStatus('Синхронизация...');
+    setStatus('Обрабатываю вкладки окна...');
+    setBatchMeta('Переключаю вкладки и собираю карточки...');
     try {
-        const result = await callMonitor('monitor:sync-now');
-        const text = result && result.status ? `Sync: ${result.status}` : 'Sync finished';
-        const meta = result ? `Pushed: ${result.pushed ?? 0}, Pulled: ${result.pulled ?? 0}` : '';
-        setStatus(text, meta, result && result.status !== 'ok');
-        await refreshStatus();
-        await loadQuickChart();
+        const result = await callMonitor('batch:run-window-export', {
+            mode,
+            allReviews,
+            includeReviews: true,
+            windowId,
+        });
+        const combinedText = String(result && result.combinedText ? result.combinedText : '');
+        if (mode === 'copy' && combinedText) {
+            await copyTextToClipboard(combinedText);
+        }
+        renderLastSession(result || null);
+        const success = Number(result && result.successCount) || 0;
+        const total = Number(result && result.totalTabs) || 0;
+        const fails = Number(result && result.failCount) || 0;
+        const actionText = mode === 'copy' ? 'скопировано в буфер' : 'скачано файлами';
+        setStatus(`Готово: ${success}/${total} карточек`, `${actionText}${fails ? `, ошибок: ${fails}` : ''}`, fails > 0);
     } catch (err) {
-        setStatus(String(err.message || err), '', true);
+        setStatus(String(err && err.message ? err.message : err), '', true);
     } finally {
         withBusy(false);
     }
-});
+};
+
+if (batchDownloadBtn) {
+    batchDownloadBtn.addEventListener('click', () => {
+        runWindowBatchExport({ mode: 'download', allReviews: false }).catch((err) => {
+            setStatus(String(err && err.message ? err.message : err), '', true);
+        });
+    });
+}
+if (batchDownloadAllBtn) {
+    batchDownloadAllBtn.addEventListener('click', () => {
+        runWindowBatchExport({ mode: 'download', allReviews: true }).catch((err) => {
+            setStatus(String(err && err.message ? err.message : err), '', true);
+        });
+    });
+}
+if (batchCopyBtn) {
+    batchCopyBtn.addEventListener('click', () => {
+        runWindowBatchExport({ mode: 'copy', allReviews: false }).catch((err) => {
+            setStatus(String(err && err.message ? err.message : err), '', true);
+        });
+    });
+}
+if (batchCopyAllBtn) {
+    batchCopyAllBtn.addEventListener('click', () => {
+        runWindowBatchExport({ mode: 'copy', allReviews: true }).catch((err) => {
+            setStatus(String(err && err.message ? err.message : err), '', true);
+        });
+    });
+}
+if (copyLastSessionBtn) {
+    copyLastSessionBtn.addEventListener('click', async () => {
+        const text = String((lastSessionTextEl && lastSessionTextEl.value) || '').trim();
+        if (!text) {
+            setStatus('В последней сессии пока нет текста');
+            return;
+        }
+        try {
+            await copyTextToClipboard(text);
+            setStatus('Текст последней сессии скопирован');
+        } catch (err) {
+            setStatus(String(err && err.message ? err.message : err), '', true);
+        }
+    });
+}
 
 if (resetProductBtn) {
     resetProductBtn.addEventListener('click', async () => {
@@ -358,6 +451,7 @@ updateResetButtonState();
 Promise.allSettled([
     refreshStatus(),
     loadQuickChart(),
+    loadLastExportSession(),
 ]).catch((err) => {
     setStatus(String(err && err.message ? err.message : err), '', true);
 });

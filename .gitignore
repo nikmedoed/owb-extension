@@ -54,3 +54,5 @@ extension/.env.*
 *.tar
 *.tar.gz
 *.7z
+*.sqlite-shm
+*.sqlite-wal

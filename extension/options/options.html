@@ -10,50 +10,60 @@
   <main class="wrap">
     <header>
       <h1>OWB Tools: настройки</h1>
-      <p>Эти значения используются как дефолт при первом запуске контент-скрипта на домене.</p>
     </header>
 
     <section class="card">
-      <label class="field">
-        <span>Default mode</span>
-        <select id="defaultMode">
-          <option value="local">local</option>
-          <option value="sync">sync</option>
-        </select>
-      </label>
-
-      <label class="field">
-        <span>Default server URL</span>
-        <input id="defaultUrl" type="text" spellcheck="false" placeholder="http://127.0.0.1:8765">
-      </label>
-
-      <div class="actions">
-        <button id="saveBtn" type="button">Сохранить дефолты</button>
-        <button id="applyBtn" type="button" class="alt">Применить к активной вкладке</button>
+      <h2>Локальный сервер и синхронизация <span id="modeTitle" class="diag-meta"></span></h2>
+      <div class="mode-row">
+        <label class="check">
+          <input id="syncEnabled" type="checkbox">
+          <span>Синхронизация</span>
+        </label>
+        <span id="syncStatus" class="mode-line"></span>
       </div>
 
-      <p id="status" class="status"></p>
+      <div class="field-inline">
+        <label for="defaultUrl">Адрес сервера</label>
+        <input id="defaultUrl" type="text" spellcheck="false" value="http://127.0.0.1:8765">
+        <button id="testBtn" type="button" class="alt">Проверить сервер</button>
+      </div>
+
+      <div id="setupHelp" class="setup-help">
+        <p>Если сервер еще не запущен, выполните в папке расширения:</p>
+        <div class="cmd-line">
+          <code id="serverCmd">python local_price_server.py</code>
+          <button id="copyServerCmdBtn" type="button" class="icon-btn" title="Скопировать команду" aria-label="Скопировать команду">
+            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false">
+              <path d="M9 9h10v10H9z" fill="none" stroke="currentColor" stroke-width="2"></path>
+              <path d="M5 5h10v10H5z" fill="none" stroke="currentColor" stroke-width="2"></path>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="save-row">
+        <span class="hint-inline">Постоянный запуск: см. README.</span>
+        <button id="saveBtn" type="button">Сохранить настройки</button>
+      </div>
     </section>
 
     <section class="card">
-      <h2>История цен: backup</h2>
-      <p>Экспорт/импорт всей базы расширения.</p>
+      <h2>База данных <span id="inspectMeta" class="diag-meta">owb-price-history-ext v1</span></h2>
+
       <div class="actions">
-        <button id="exportBtn" type="button">Экспорт истории</button>
-        <button id="importBtn" type="button" class="alt">Импорт истории</button>
+        <button id="exportBtn" type="button">Экспорт базы</button>
+        <button id="importAppendBtn" type="button" class="alt">Дополнить базу</button>
+        <button id="importReplaceBtn" type="button" class="alt">Заменить базу</button>
       </div>
       <input id="importFile" type="file" accept="application/json,.json" hidden>
-    </section>
-
-    <section class="card">
-      <h2>Диагностика БД</h2>
-      <p>Сводка подтягивается автоматически при открытии страницы.</p>
-      <p id="inspectMeta" class="status">Загрузка данных…</p>
-      <div id="inspectHealth" class="diag-health">Проверка состояния базы…</div>
 
       <div class="diag-grid">
         <div class="diag-kpi">
-          <div class="diag-kpi__label">Товаров</div>
+          <div class="diag-kpi__label">Всего записей</div>
+          <div id="inspectTotalRecords" class="diag-kpi__value">—</div>
+        </div>
+        <div class="diag-kpi">
+          <div class="diag-kpi__label">Товаров (ключей)</div>
           <div id="inspectTotalProducts" class="diag-kpi__value">—</div>
         </div>
         <div class="diag-kpi">
@@ -61,33 +71,30 @@
           <div id="inspectTotalIntervals" class="diag-kpi__value">—</div>
         </div>
         <div class="diag-kpi">
-          <div class="diag-kpi__label">Ср. интервалов/товар</div>
+          <div class="diag-kpi__label">Интервалов на товар</div>
           <div id="inspectAvgPerProduct" class="diag-kpi__value">—</div>
+        </div>
+        <div class="diag-kpi">
+          <div class="diag-kpi__label">Ozon товаров (доля)</div>
+          <div id="inspectOzonProducts" class="diag-kpi__value">—</div>
+        </div>
+        <div class="diag-kpi">
+          <div class="diag-kpi__label">WB товаров (доля)</div>
+          <div id="inspectWbProducts" class="diag-kpi__value">—</div>
+        </div>
+        <div class="diag-kpi">
+          <div class="diag-kpi__label">Последняя запись</div>
+          <div id="inspectLastActivity" class="diag-kpi__value diag-kpi__value--compact">—</div>
+        </div>
+        <div class="diag-kpi">
+          <div class="diag-kpi__label">Статус</div>
+          <div id="inspectHealth" class="diag-kpi__value">—</div>
         </div>
       </div>
 
-      <div class="diag-block">
-        <h3>По маркетплейсам</h3>
-        <ul id="inspectMarkets" class="diag-list"></ul>
-      </div>
-
-      <div class="diag-block">
-        <h3>Последние товары</h3>
-        <ul id="inspectProductsList" class="diag-list"></ul>
-      </div>
-
-      <div class="diag-block">
-        <h3>Последние интервалы цен</h3>
-        <ul id="inspectIntervalsList" class="diag-list"></ul>
-      </div>
+      <p id="dbStatus" class="status"></p>
     </section>
 
-    <section class="card">
-      <h2>Локальный сервер</h2>
-      <p>Для sync-режима поднимите ваш сервер из папки Tamper-проекта:</p>
-      <pre><code>python local_price_server.py</code></pre>
-      <p>По умолчанию используется <code>http://127.0.0.1:8765</code>.</p>
-    </section>
   </main>
   <script src="options.js"></script>
 </body>

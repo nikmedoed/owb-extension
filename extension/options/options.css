@@ -19,7 +19,13 @@ body {
 
 h1,
 h2 {
-  margin: 0 0 6px;
+  margin: 0 0 0;
+}
+
+.diag-meta {
+  font-size: 16px;
+  font-weight: 500;
+  color: #4b5563;
 }
 
 p {
@@ -44,6 +50,75 @@ p {
   color: #4b5563;
 }
 
+.field-inline {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.field-inline label {
+  color: #4b5563;
+  white-space: nowrap;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.check input {
+  margin: 0;
+}
+
+.mode-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.mode-line {
+  color: #4b5563;
+  font-weight: 600;
+}
+
+.setup-help {
+  display: grid;
+  gap: 6px;
+}
+
+.cmd-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #f6f8fb;
+  border: 1px solid #dbe2ec;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.cmd-line code {
+  flex: 1;
+  overflow: auto;
+  white-space: nowrap;
+}
+
+.icon-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #97a7bf;
+  border-radius: 6px;
+  background: #fff;
+  color: #233146;
+  padding: 0;
+}
+
 input,
 select,
 button {
@@ -61,6 +136,19 @@ select {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.save-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.hint-inline {
+  color: #4b5563;
+  font-size: 13px;
 }
 
 button {
@@ -92,32 +180,6 @@ pre {
   max-height: 280px;
 }
 
-.diag-health {
-  border: 1px solid #dbe2ec;
-  border-radius: 8px;
-  background: #f6f8fb;
-  padding: 8px 10px;
-  color: #1f2328;
-}
-
-.diag-health.ok {
-  border-color: #9ad6b5;
-  background: #eefaf3;
-  color: #0f5132;
-}
-
-.diag-health.warn {
-  border-color: #f3c97a;
-  background: #fff8e9;
-  color: #7a4f01;
-}
-
-.diag-health.empty {
-  border-color: #dbe2ec;
-  background: #f6f8fb;
-  color: #4b5563;
-}
-
 .diag-grid {
   display: grid;
   gap: 8px;
@@ -141,6 +203,19 @@ pre {
   font-size: 20px;
   font-weight: 700;
   line-height: 1.2;
+}
+
+.diag-kpi__value--text {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.diag-kpi__value--compact {
+  font-size: 20px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .diag-block {

@@ -26,6 +26,7 @@ const SYNC_CFG = {
     minFetchTtlMs: 20000,
     historyFetchTtlMs: 15000,
 };
+const DEFAULT_SERVER_URL = 'http://127.0.0.1:8765';
 
 const sanitizeFilename = (name) => {
     const base = String(name || DEFAULT_DOWNLOAD_NAME).trim() || DEFAULT_DOWNLOAD_NAME;
@@ -859,7 +860,19 @@ const exportPriceDb = async () => {
     };
 };
 
+const clearPriceDb = async () => {
+    const db = await openPriceDb();
+    const tx = db.transaction([PRICE_DB.intervals, PRICE_DB.products], 'readwrite');
+    tx.objectStore(PRICE_DB.intervals).clear();
+    tx.objectStore(PRICE_DB.products).clear();
+    await txDone(tx);
+};
+
 const importPriceDb = async (payload) => {
+    const mode = payload?.mode === 'replace' ? 'replace' : 'append';
+    const source = payload && typeof payload === 'object' && payload.data && typeof payload.data === 'object'
+        ? payload.data
+        : payload;
     const events = [];
     const addEvent = (raw) => {
         const n = normalizePriceRecord(raw);
@@ -873,19 +886,23 @@ const importPriceDb = async (payload) => {
     };
 
     const snapshots = [
-        payload?.prices?.records,
-        payload?.snapshots,
-        payload?.history,
-        payload?.records,
+        source?.prices?.records,
+        source?.snapshots,
+        source?.history,
+        source?.records,
     ];
     snapshots.forEach((list) => {
         if (Array.isArray(list)) list.forEach(addEvent);
     });
-    if (Array.isArray(payload?.intervals?.records)) payload.intervals.records.forEach(addIntervalAsEvents);
+    if (Array.isArray(source?.intervals?.records)) source.intervals.records.forEach(addIntervalAsEvents);
 
     events.sort((a, b) => a.ts - b.ts);
+    if (mode === 'replace') {
+        await clearPriceDb();
+    }
     const stats = await capturePriceBatch(events);
     return {
+        mode,
         imported: events.length,
         created: stats.created,
         touched: stats.touched,
@@ -913,7 +930,10 @@ const loadSyncConfig = async () => {
         CONFIG_KEYS.lastSyncTs,
     ]);
     const mode = raw[CONFIG_KEYS.mode] === 'sync' ? 'sync' : 'local';
-    const serverUrl = trimServerUrl(raw[CONFIG_KEYS.url] || '');
+    const rawUrl = Object.prototype.hasOwnProperty.call(raw || {}, CONFIG_KEYS.url)
+        ? raw[CONFIG_KEYS.url]
+        : DEFAULT_SERVER_URL;
+    const serverUrl = trimServerUrl(rawUrl || '');
     const legacyCursor = toInt(raw[CONFIG_KEYS.cursor], 0);
     const pullCursorTs = Math.max(toInt(raw[CONFIG_KEYS.pullCursor], legacyCursor), legacyCursor);
     const pullCursorId = Math.max(0, toInt(raw[CONFIG_KEYS.pullCursorId], 0));
@@ -1228,6 +1248,201 @@ const getMergedMinBatch = async (pidKeys) => {
     return getMinBatch(keys);
 };
 
+const LAST_EXTRACT_SESSION_KEY = 'owb-last-extract-session';
+const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const tabsQuery = (queryInfo) => new Promise((resolve, reject) => {
+    chrome.tabs.query(queryInfo, (tabs) => {
+        const err = chrome.runtime.lastError;
+        if (err) {
+            reject(new Error(err.message || 'Cannot query tabs'));
+            return;
+        }
+        resolve(Array.isArray(tabs) ? tabs : []);
+    });
+});
+const tabsUpdate = (tabId, updateProps) => new Promise((resolve, reject) => {
+    chrome.tabs.update(tabId, updateProps, (tab) => {
+        const err = chrome.runtime.lastError;
+        if (err) {
+            reject(new Error(err.message || 'Cannot update tab'));
+            return;
+        }
+        resolve(tab || null);
+    });
+});
+const tabsGet = (tabId) => new Promise((resolve, reject) => {
+    chrome.tabs.get(tabId, (tab) => {
+        const err = chrome.runtime.lastError;
+        if (err) {
+            reject(new Error(err.message || 'Cannot get tab'));
+            return;
+        }
+        resolve(tab || null);
+    });
+});
+const sendMessageToTab = (tabId, message) => new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+        const err = chrome.runtime.lastError;
+        if (err) {
+            reject(new Error(err.message || 'Cannot communicate with tab'));
+            return;
+        }
+        resolve(response);
+    });
+});
+const waitTabComplete = async (tabId, timeoutMs = 25000) => {
+    const current = await tabsGet(tabId).catch(() => null);
+    if (!current || current.status === 'complete') return true;
+    return new Promise((resolve) => {
+        let done = false;
+        let timer = null;
+        const finish = () => {
+            if (done) return;
+            done = true;
+            if (timer) clearTimeout(timer);
+            chrome.tabs.onUpdated.removeListener(onUpdated);
+            resolve(true);
+        };
+        const onUpdated = (updatedTabId, changeInfo) => {
+            if (updatedTabId !== tabId) return;
+            if (changeInfo.status === 'complete') finish();
+        };
+        chrome.tabs.onUpdated.addListener(onUpdated);
+        timer = setTimeout(() => finish(), Math.max(3000, Number(timeoutMs) || 25000));
+    });
+};
+const MARKET_HOST_RE = /(^|\.)((ozon\.(ru|com|kz|by|uz|am|kg|ge))|(wildberries\.(ru|by|kz|uz|am|kg|ge))|(wb\.ru))$/i;
+const parseMarketProductFromUrl = (url) => {
+    try {
+        const u = new URL(String(url || ''));
+        if (!/^https?:$/i.test(u.protocol)) return null;
+        const host = String(u.hostname || '').toLowerCase();
+        const path = String(u.pathname || '');
+        if (!MARKET_HOST_RE.test(host)) return null;
+        if (host.includes('ozon')) {
+            const m = path.match(/\/product\/[^/]*?(\d{5,})(?:\/|$)/) || path.match(/\/product\/(\d{5,})(?:\/|$)/);
+            if (!m) return null;
+            return { market: 'ozon', pid: m[1], pidKey: `ozon:${m[1]}` };
+        }
+        if (host.includes('wildberries') || host.endsWith('wb.ru')) {
+            const m = path.match(/\/catalog\/(\d{4,})\/detail/i) || path.match(/\/catalog\/(\d{4,})\/feedbacks/i);
+            if (!m) return null;
+            return { market: 'wb', pid: m[1], pidKey: `wb:${m[1]}` };
+        }
+        return null;
+    } catch (_) {
+        return null;
+    }
+};
+const collectWindowProductTabs = async (windowId = null) => {
+    const queryInfo = (Number.isFinite(Number(windowId)) && Number(windowId) >= 0)
+        ? { windowId: Number(windowId) }
+        : { currentWindow: true };
+    const tabs = await tabsQuery(queryInfo);
+    return tabs
+        .map((tab) => ({ tab, product: parseMarketProductFromUrl(tab.url) }))
+        .filter((item) => !!item.product && Number.isFinite(Number(item.tab && item.tab.id)));
+};
+const buildCombinedText = (items) => items
+    .map((item, idx) => {
+        const title = String(item.title || item.pidKey || item.url || `card-${idx + 1}`).trim();
+        const url = String(item.url || '').trim();
+        return `### ${idx + 1}. ${title}${url ? `\nURL: ${url}` : ''}\n\n${item.text || ''}`;
+    })
+    .join('\n\n---\n\n');
+const getLastExtractSession = async () => {
+    const raw = await storageGet([LAST_EXTRACT_SESSION_KEY]);
+    return raw[LAST_EXTRACT_SESSION_KEY] || null;
+};
+const runWindowExportBatch = async (opts = {}) => {
+    const mode = opts.mode === 'copy' ? 'copy' : 'download';
+    const allReviews = opts.allReviews === true;
+    const includeReviews = opts.includeReviews !== false;
+    const tabPairs = await collectWindowProductTabs(opts.windowId);
+    const originalActive = tabPairs.find((item) => item.tab && item.tab.active)?.tab || null;
+    const successes = [];
+    const failures = [];
+
+    for (let i = 0; i < tabPairs.length; i += 1) {
+        const { tab, product } = tabPairs[i];
+        try {
+            await tabsUpdate(tab.id, { active: true });
+            await waitTabComplete(tab.id, 25000);
+            await sleepMs(450);
+            const response = await sendMessageToTab(tab.id, {
+                scope: 'owb-export',
+                action: 'export-card',
+                options: {
+                    includeReviews,
+                    allReviews,
+                },
+            });
+            if (!response || !response.ok || !response.data || !response.data.text) {
+                throw new Error(response && response.error ? response.error : 'Empty export response');
+            }
+            const data = response.data;
+            const filename = sanitizeFilename(data.filename || `${product.pidKey || `card_${tab.id}`}.txt`);
+            const item = {
+                tabId: tab.id,
+                market: data.market || product.market,
+                pidKey: data.pidKey || product.pidKey,
+                title: data.title || tab.title || product.pidKey,
+                url: data.url || tab.url,
+                filename,
+                text: String(data.text || ''),
+            };
+            if (mode === 'download') {
+                await handleDownloadText({
+                    name: filename,
+                    text: item.text,
+                });
+            }
+            successes.push(item);
+        } catch (err) {
+            failures.push({
+                tabId: tab.id,
+                url: tab.url || '',
+                pidKey: product && product.pidKey ? product.pidKey : '',
+                error: String(err && err.message ? err.message : err),
+            });
+        }
+    }
+
+    if (originalActive && Number.isFinite(Number(originalActive.id))) {
+        await tabsUpdate(originalActive.id, { active: true }).catch(() => null);
+    }
+
+    const combinedText = buildCombinedText(successes);
+    const maxStoredChars = 900000;
+    const storedText = combinedText.length > maxStoredChars
+        ? `${combinedText.slice(0, maxStoredChars)}\n\n[...ОБРЕЗАНО ДЛЯ ХРАНЕНИЯ В СЕССИИ...]`
+        : combinedText;
+    const session = {
+        createdAt: now(),
+        mode,
+        allReviews,
+        totalTabs: tabPairs.length,
+        successCount: successes.length,
+        failCount: failures.length,
+        failures,
+        items: successes.map((item) => ({
+            tabId: item.tabId,
+            market: item.market,
+            pidKey: item.pidKey,
+            title: item.title,
+            url: item.url,
+            filename: item.filename,
+        })),
+        text: storedText,
+        storedTruncated: storedText.length !== combinedText.length,
+    };
+    await storageSet({ [LAST_EXTRACT_SESSION_KEY]: session });
+    return {
+        ...session,
+        combinedText,
+    };
+};
+
 const getPriceStatus = async () => {
     const cfg = await loadSyncConfig();
     let reachable = false;
@@ -1293,6 +1508,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             return { ok: true, data: await setPriceConfig(message.payload || {}) };
         case 'owb:price-sync-now':
             return { ok: true, data: await runSyncNow({ reason: 'manual' }) };
+        case 'owb:batch-run-window-export':
+            return { ok: true, data: await runWindowExportBatch(message.payload || {}) };
+        case 'owb:batch-get-last-session':
+            return { ok: true, data: await getLastExtractSession() };
         default:
             return { ok: false, error: `Unknown message type: ${message.type}` };
         }

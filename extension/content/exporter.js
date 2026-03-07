@@ -16,6 +16,10 @@
         downloadTextFile,
         toBullets,
     } = MP;
+    const runtimeBridge = {
+        runExport: null,
+    };
+    const hasRuntime = () => !!(globalThis.chrome && chrome.runtime && chrome.runtime.onMessage);
 
     const ensureActionButtonsStyles = () => addStyleOnce(`
         .mp-export-actions{display:inline-flex;flex-wrap:wrap;gap:6px;margin-left:8px;vertical-align:middle}
@@ -111,18 +115,89 @@
             });
         };
 
-        const findReviewHeaderNode = () => {
-            const direct = document.querySelector('[data-widget="webListReviews"]');
-            if (direct) return direct;
-            return [...document.querySelectorAll('span, h2, h3, div')]
-                .find((s) => /Отзывы о товаре|Отзывы/i.test((s.textContent || '').trim())) || null;
+        const pickClosestForwardNode = (nodes) => {
+            const list = (nodes || []).filter(Boolean);
+            if (!list.length) return null;
+            const minDocY = Math.max(0, window.scrollY - 24);
+            const withPos = list
+                .map((el) => ({ el, y: window.scrollY + el.getBoundingClientRect().top }))
+                .filter((x) => Number.isFinite(x.y));
+            const below = withPos
+                .filter((x) => x.y >= minDocY)
+                .sort((a, b) => a.y - b.y);
+            if (below.length) return below[0].el;
+            return null;
         };
-        const findDescriptionSection = () => document.querySelector('[data-widget="webDescription"]')
-            || document.querySelector('#section-description')
-            || document.querySelector('[id*="section-description"]');
-        const findCharacteristicsSection = () => document.querySelector('#section-characteristics')
-            || document.querySelector('[data-widget*="characteristics" i]')
-            || [...document.querySelectorAll('h2, h3, span, div')].find((n) => /Характеристики/i.test((n.textContent || '').trim()))?.closest('section, div');
+        const findReviewHeaderNode = () => {
+            const direct = pickClosestForwardNode([
+                ...document.querySelectorAll('[data-widget="webListReviews"], #section-reviews, [id*="section-reviews" i]'),
+            ]);
+            if (direct) return direct;
+            const byCard = pickClosestForwardNode([...document.querySelectorAll('[data-review-uuid]')]);
+            return byCard ? (byCard.closest('[data-widget], section, article, div') || byCard) : null;
+        };
+        const findDescriptionSection = () => {
+            const direct = pickClosestForwardNode([
+                ...document.querySelectorAll('[data-widget="webDescription"], #section-description, [id*="section-description"]'),
+            ]);
+            if (direct) return direct;
+            return pickClosestForwardNode(
+                [...document.querySelectorAll('h2, h3')]
+                    .filter((n) => /^\s*(описание|о товаре)\s*$/i.test(n.textContent || '')),
+            );
+        };
+        const findCharacteristicsSection = () => {
+            const direct = pickClosestForwardNode([
+                ...document.querySelectorAll('#section-characteristics, [id*="section-characteristics" i], [data-widget="webCharacteristics"], [data-widget*="characteristics" i]'),
+            ]);
+            if (direct) return direct;
+            return pickClosestForwardNode(
+                [...document.querySelectorAll('h2, h3')]
+                    .filter((n) => /^\s*характеристик/i.test(n.textContent || '')),
+            );
+        };
+        const stepPageDown = async (stepRatio = 0.5, delay = 260, smoothScroll = true) => {
+            const delta = Math.max(240, Math.round(window.innerHeight * stepRatio));
+            if (smoothScroll) {
+                window.scrollBy({ top: delta, behavior: 'smooth' });
+            } else {
+                window.scrollBy(0, delta);
+            }
+            await sleep(delay);
+        };
+        const scrollToElementProgressive = async (el, options = {}) => {
+            if (!el) return;
+            const block = options.block || 'start';
+            const rect = el.getBoundingClientRect();
+            const topThreshold = Math.round(window.innerHeight * 0.12);
+            const bottomThreshold = Math.round(window.innerHeight * 0.88);
+            if (rect.top >= topThreshold && rect.bottom <= bottomThreshold) return;
+            el.scrollIntoView({ behavior: 'smooth', block, inline: 'nearest' });
+            await sleep(Number(options.settleMs) || 220);
+        };
+        const findWithPageScroll = async (finder, options = {}) => {
+            const maxSteps = Number(options.maxSteps) || 24;
+            const stepRatio = Number(options.stepRatio) || 0.5;
+            const delay = Number(options.delay) || 260;
+            let node = finder();
+            for (let i = 0; !node && i < maxSteps; i += 1) {
+                await stepPageDown(stepRatio, delay, true);
+                node = finder();
+            }
+            return node || null;
+        };
+        const gotoSection = async (finder, options = {}) => {
+            const node = await findWithPageScroll(finder, options);
+            if (!node) return null;
+            await scrollToElementProgressive(node, {
+                block: options.block || 'center',
+                stepRatio: options.stepRatio || 0.45,
+                delay: options.delay || 180,
+                maxHops: options.maxHops || 20,
+                settleMs: options.settleMs || 240,
+            });
+            return node;
+        };
         const parseRatingValue = (text) => {
             const m = String(text || '').replace(',', '.').match(/\b([0-5](?:\.\d)?)\b/);
             return m ? m[1] : '—';
@@ -167,6 +242,9 @@
 
         /* ------- collect product info ------- */
         async function collectInfo() {
+            window.scrollTo({ top: 0, behavior: 'auto' });
+            await sleep(120);
+
             const url = location.href;
             const heading = await wait('[data-widget="webProductHeading"]', 12000).catch(() => null);
             const title = heading?.querySelector('h1')?.innerText.trim() || document.querySelector('h1')?.innerText.trim() || '—';
@@ -208,7 +286,10 @@
             );
 
             let desc = '—';
-            const descSection = await wait('[data-widget="webDescription"], #section-description, [id*="section-description"]', 12000).catch(() => null);
+            const descSection = await gotoSection(
+                () => findDescriptionSection(),
+                { maxSteps: 14, stepRatio: 0.44, delay: 220, settleMs: 220, block: 'start' },
+            );
             if (descSection) {
                 const descRoot = descSection.closest('[data-widget="webDescription"]') || descSection;
                 await smooth(descRoot);
@@ -241,7 +322,10 @@
             }
 
             let chars = '—';
-            const cSec = await wait('#section-characteristics, [data-widget*="characteristics" i]', 12000).catch(() => null) || findCharacteristicsSection();
+            let cSec = await gotoSection(
+                () => findCharacteristicsSection(),
+                { maxSteps: 120, stepRatio: 0.42, delay: 230, settleMs: 240, block: 'start' },
+            );
             if (cSec) {
                 await smooth(cSec);
                 const rows = [];
@@ -264,41 +348,99 @@
 
         /* --------- reviews ---------- */
         async function loadReviews(max = 100, opts = {}) {
-            const switchToVariant = opts.switchToVariant !== false;
+            const switchToVariant = opts.switchToVariant === true;
             const avgFromInfo = opts.avgRating || '—';
             const declaredFromInfo = Number(opts.reviewsTotal) || 0;
-            const reviewHeaderNode = findReviewHeaderNode();
+            const noProgressTimeoutMs = Math.max(3000, Number(opts.noProgressTimeoutMs) || 3000);
+            const reviewHeaderNode = await gotoSection(
+                () => findReviewHeaderNode(),
+                { maxSteps: 140, stepRatio: 0.42, delay: 240, settleMs: 260, block: 'start' },
+            );
             if (!reviewHeaderNode) return { header: `Отзывы: нет отзывов. Средняя оценка: ${avgFromInfo}`, items: [] };
 
-            const reviewSection = reviewHeaderNode.closest('[data-widget="webListReviews"]') || reviewHeaderNode;
+            const reviewSectionSelector = '[data-widget="webListReviews"], #section-reviews, [id*="section-reviews" i]';
+            const reviewNodesSelector = '[data-review-uuid], [data-review-id]';
+            const resolveReviewSection = (seed = null) => {
+                const rooted = seed?.closest(reviewSectionSelector) || seed || null;
+                const candidates = [...document.querySelectorAll(reviewSectionSelector)];
+                const scored = candidates
+                    .map((el) => ({
+                        el,
+                        count: el.querySelectorAll(reviewNodesSelector).length,
+                        top: Math.abs(el.getBoundingClientRect().top),
+                    }))
+                    .sort((a, b) => (b.count - a.count) || (a.top - b.top));
+                if (scored.length && scored[0].count > 0) return scored[0].el;
+                return rooted || null;
+            };
+
+            let reviewSection = resolveReviewSection(reviewHeaderNode);
+            if (!reviewSection) return { header: `Отзывы: нет отзывов. Средняя оценка: ${avgFromInfo}`, items: [] };
             await smooth(reviewSection);
+            await sleep(180);
 
             if (switchToVariant) {
                 await clickVariantWhenReady();
                 await sleep(600);
             }
+            reviewSection = resolveReviewSection(reviewSection) || reviewSection;
+
+            const refreshReviewSection = () => {
+                const direct = resolveReviewSection(reviewSection);
+                if (direct) {
+                    reviewSection = direct;
+                    return reviewSection;
+                }
+                const fallback = document.querySelector(reviewSectionSelector);
+                if (fallback) {
+                    reviewSection = fallback;
+                    return reviewSection;
+                }
+                return reviewSection;
+            };
 
             const declared = parseCount(reviewSection.textContent || '') || declaredFromInfo;
-            const moreBtn = () => [...reviewSection.querySelectorAll('button, [role="button"]')]
-                .find((b) => /ещё|еще|показать|следующ|загрузить/i.test((b.innerText || '').toLowerCase()));
-
-            const DELAY = 700;
-            const MAX_IDLE = 7;
-            let idle = 0;
-            const reviewNodesSelector = '[data-review-uuid]';
-            while (reviewSection.querySelectorAll(reviewNodesSelector).length < Math.min(max, declared || max) && idle < MAX_IDLE) {
-                const before = reviewSection.querySelectorAll(reviewNodesSelector).length;
-                const btn = moreBtn();
-                if (btn) btn.click();
-                else window.scrollBy(0, Math.round(window.innerHeight * 0.8));
-                await sleep(DELAY);
-                const after = reviewSection.querySelectorAll(reviewNodesSelector).length;
-                idle = after === before ? idle + 1 : 0;
-            }
-
-            const nodes = [...reviewSection.querySelectorAll(reviewNodesSelector)].slice(0, max);
+            const requestedMax = Number.isFinite(Number(max)) ? Math.max(1, Math.floor(Number(max))) : 100;
+            const targetCount = requestedMax;
+            const moreBtn = () => {
+                const roots = [refreshReviewSection(), document];
+                for (const root of roots) {
+                    if (!root) continue;
+                    const found = [...root.querySelectorAll('button, [role="button"], a[role="button"], a')]
+                        .find((b) => {
+                            const text = (b.innerText || '').toLowerCase();
+                            const r = b.getBoundingClientRect();
+                            if (r.bottom < 0 || r.top > window.innerHeight) return false;
+                            if (!/(ещё|еще|показать|следующ|загрузить|больше|more)/i.test(text)) return false;
+                            if (!/(отзыв|коммент|review)/i.test(text)) return false;
+                            return true;
+                        });
+                    if (found) return found;
+                }
+                return null;
+            };
+            const isLikelyRatingSvg = (svg) => {
+                if (!svg) return false;
+                const path = svg.querySelector('path');
+                const width = Number(svg.getAttribute('width') || 0);
+                const height = Number(svg.getAttribute('height') || 0);
+                const viewBox = String(svg.getAttribute('viewBox') || '').trim();
+                const raw = [
+                    svg.getAttribute('style') || '',
+                    svg.getAttribute('color') || '',
+                    svg.style?.color || '',
+                    path?.getAttribute('fill') || '',
+                    path?.getAttribute('style') || '',
+                ].join(' ').toLowerCase();
+                if (/graphicrating|graphictertiary|graphicneutral|disabled/.test(raw)) return true;
+                if (width === 20 && height === 20 && viewBox === '0 0 24 24') return true;
+                const d = String(path?.getAttribute('d') || '').replace(/\s+/g, '');
+                if (d.startsWith('M9.3586.136C10.53')) return true;
+                return d.includes('2.6433.136') && d.includes('3.8421.457');
+            };
             const isFilledStarSvg = (svg) => {
                 if (!svg) return null;
+                if (!isLikelyRatingSvg(svg)) return null;
                 const path = svg.querySelector('path');
                 const raw = [
                     svg.getAttribute('style') || '',
@@ -320,6 +462,40 @@
                 }
                 return null;
             };
+            const parseRatingFromStarsContainer = (container) => {
+                if (!container) return null;
+                const stars = [...container.querySelectorAll(':scope > svg')].filter((svg) => isLikelyRatingSvg(svg)).slice(0, 5);
+                if (!stars.length || stars.length > 5) return null;
+                let filled = 0;
+                let unknown = 0;
+                stars.forEach((svg) => {
+                    const state = isFilledStarSvg(svg);
+                    if (state === true) filled += 1;
+                    else if (state === null) unknown += 1;
+                });
+                if (filled >= 1 && filled <= 5) return String(filled);
+                if (filled === 0 && unknown > 0 && stars.length >= 1 && stars.length <= 5) return String(stars.length);
+                return null;
+            };
+            const getRatingContainers = (n) => {
+                const preferredRoots = [
+                    n.querySelector('[class*="vk0_"]'),
+                    n.querySelector('[class*="rating" i]'),
+                    n.querySelector('[aria-label*="рейтинг" i]'),
+                    n,
+                ].filter(Boolean);
+                const out = [];
+                preferredRoots.forEach((root) => {
+                    [...root.querySelectorAll('div, span')]
+                        .filter((el) => {
+                            const svgs = el.querySelectorAll(':scope > svg');
+                            if (!svgs.length || svgs.length > 5) return false;
+                            return [...svgs].every((svg) => isLikelyRatingSvg(svg));
+                        })
+                        .forEach((el) => out.push(el));
+                });
+                return [...new Set(out)];
+            };
             const extractReviewRating = (n) => {
                 const data = n.getAttribute('data-rate') || n.getAttribute('data-rating') || '';
                 if (/^[0-5](?:[.,]\d)?$/.test(String(data).trim())) return String(data).replace(',', '.');
@@ -328,26 +504,20 @@
                 const ariaMatch = aria.match(/([0-5](?:[.,]\d)?)/);
                 if (ariaMatch) return ariaMatch[1].replace(',', '.');
 
-                const directFilled = n.querySelectorAll('svg[style*="graphicRating" i], path[fill*="graphicRating" i]').length;
+                const directFilled = n.querySelectorAll('svg[style*="graphicRating" i]').length;
                 if (directFilled >= 1 && directFilled <= 5) return String(directFilled);
 
-                const candidates = [...n.querySelectorAll('div, span')]
-                    .map((el) => ({ el, svgs: el.querySelectorAll('svg') }))
-                    .filter((x) => x.svgs.length >= 3 && x.svgs.length <= 6)
-                    .sort((a, b) => a.svgs.length - b.svgs.length);
-
-                for (const cand of candidates) {
-                    const svgs = [...cand.svgs].slice(0, 5);
-                    let filled = 0;
-                    let unknown = 0;
-                    svgs.forEach((svg) => {
-                        const state = isFilledStarSvg(svg);
-                        if (state === true) filled += 1;
-                        else if (state === null) unknown += 1;
-                    });
-                    if (filled >= 1 && filled <= 5) return String(filled);
-                    if (!filled && unknown === 0 && svgs.length >= 1 && svgs.length <= 5) return String(svgs.length);
+                const containers = getRatingContainers(n);
+                for (const container of containers) {
+                    const parsed = parseRatingFromStarsContainer(container);
+                    if (parsed) return parsed;
                 }
+
+                const allLikelyStars = [...n.querySelectorAll('svg')].filter((svg) => isLikelyRatingSvg(svg));
+                if (allLikelyStars.length >= 1 && allLikelyStars.length <= 5) return String(allLikelyStars.length);
+
+                const textMatch = (n.textContent || '').match(/\b([1-5](?:[.,]\d)?)\s*(?:из\s*5|\/\s*5|★)/i);
+                if (textMatch) return textMatch[1].replace(',', '.');
 
                 return '—';
             };
@@ -381,6 +551,17 @@
                         .find((el) => (el.textContent || '').trim().toLowerCase() === label);
                     return h ? h.parentElement?.querySelector('span, div, p')?.innerText.trim() : '';
                 };
+                const looksLikeAuthorName = (raw) => {
+                    const t = String(raw || '').replace(/\s+/g, ' ').trim();
+                    if (!t) return false;
+                    if (/[!?;:]/.test(t)) return false;
+                    if (/\d/.test(t)) return false;
+                    if (t.length > 40) return false;
+                    if (/^[A-ZА-ЯЁ][a-zа-яё]{1,24}\s+[A-ZА-ЯЁ]\.$/u.test(t)) return true; // Александр Е.
+                    if (/^[A-ZА-ЯЁ][a-zа-яё]{1,24}(?:\s+[A-ZА-ЯЁ][a-zа-яё]{1,24}){1,2}$/u.test(t)) return true; // Лето Навсегда
+                    if (/^[A-ZА-ЯЁ][a-zа-яё]{1,24}$/u.test(t)) return true; // Имя
+                    return false;
+                };
                 const pros = findPart('достоинства');
                 const cons = findPart('недостатки');
                 const comment = findPart('комментарий');
@@ -394,32 +575,148 @@
                 const span = n.querySelector('span.ro5_30, span[class*="ro5_"]');
                 if (span) {
                     const t = span.innerText.trim();
-                    if (t && !looksLikeDate(t)) return t;
+                    if (t && !looksLikeDate(t) && !looksLikeAuthorName(t)) return t;
                 }
                 const bodyNode = n.querySelector('[class*="vk1_"], [class*="review-text"], [class*="comment"]');
                 if (bodyNode) {
                     const bodyText = bodyNode.innerText.trim();
-                    if (bodyText && bodyText.length >= 8) return bodyText;
+                    if (bodyText && bodyText.length >= 8 && !looksLikeAuthorName(bodyText)) return bodyText;
                 }
-                const BAD = /Вам помог|Размер|Цвет|коммент|вопрос|ответ|Похожие|Да \d+|Нет \d+/i;
+                const BAD = /Вам помог|Размер|Цвет|коммент|вопрос|ответ|Похожие|Да \d+|Нет \d+|покупатель|пользователь/i;
                 const leaves = [...n.querySelectorAll('span, div, p')].filter((el) => !el.children.length && !BAD.test(el.innerText));
                 const texts = leaves
                     .map((el) => el.innerText.trim())
-                    .filter((t) => t.length >= 10 && !looksLikeDate(t));
+                    .filter((t) => t.length >= 8 && !looksLikeDate(t) && !looksLikeAuthorName(t));
                 texts.sort((a, b) => b.length - a.length);
                 return texts[0] || '—';
             };
 
+            const collected = new Map();
+            const getNodeId = (n) =>
+                n?.getAttribute('data-review-uuid')
+                || n?.getAttribute('data-review-id')
+                || n?.getAttribute('id')
+                || '';
+            const upsertFromNode = (n) => {
+                if (!n) return false;
+                const uuid = getNodeId(n);
+                if (!uuid) return false;
+                const next = {
+                    uuid,
+                    date: getDate(n),
+                    ratingText: extractReviewRating(n),
+                    text: getText(n).replace(/\s+/g, ' '),
+                    order: Number.isFinite(collected.get(uuid)?.order) ? collected.get(uuid).order : collected.size,
+                };
+                if (!next.text || next.text === '—') next.text = 'Без текста';
+
+                const prev = collected.get(uuid);
+                if (!prev) {
+                    if (collected.size >= targetCount) return false;
+                    collected.set(uuid, next);
+                    return true;
+                }
+                const preferRating = prev.ratingText === '—' && next.ratingText !== '—';
+                const preferText = (prev.text || '').length < (next.text || '').length;
+                const preferDate = prev.date === '—' && next.date !== '—';
+                if (preferRating || preferText || preferDate) {
+                    collected.set(uuid, { ...prev, ...next, order: prev.order });
+                }
+                return false;
+            };
+            const getOrderedReviewNodes = () => {
+                const seen = new Set();
+                const nodes = [...document.querySelectorAll(reviewNodesSelector)]
+                    .filter((n) => {
+                        const id = getNodeId(n);
+                        if (!id || seen.has(id)) return false;
+                        seen.add(id);
+                        return true;
+                    })
+                    .sort((a, b) => {
+                        const ay = window.scrollY + a.getBoundingClientRect().top;
+                        const by = window.scrollY + b.getBoundingClientRect().top;
+                        return ay - by;
+                    });
+                return nodes;
+            };
+            const collectNow = () => {
+                refreshReviewSection();
+                const before = collected.size;
+                const nodes = getOrderedReviewNodes();
+                for (const n of nodes) {
+                    upsertFromNode(n);
+                    if (collected.size >= targetCount) break;
+                }
+                return { nodes, added: collected.size - before };
+            };
+            const scrollStep = async (ratio = 0.9, waitMs = 140) => {
+                const total = Math.max(260, Math.round(window.innerHeight * ratio));
+                window.scrollBy(0, total);
+                await sleep(waitMs);
+            };
+
+            collectNow();
+            let safetyLoops = 0;
+            let extraStepTried = false;
+            let lastCollectedCount = collected.size;
+            let noProgressSince = Date.now();
+            while (collected.size < targetCount && safetyLoops < 500) {
+                safetyLoops += 1;
+                const { added } = collectNow();
+                if (collected.size >= targetCount) break;
+
+                if (collected.size > lastCollectedCount || added > 0) {
+                    lastCollectedCount = collected.size;
+                    noProgressSince = Date.now();
+                    extraStepTried = false;
+                    await scrollStep(0.86, 120);
+                    continue;
+                }
+
+                const btn = moreBtn();
+                if (btn) {
+                    btn.click();
+                    await sleep(120);
+                }
+                await scrollStep(0.92, 140);
+                collectNow();
+                if (collected.size > lastCollectedCount) {
+                    lastCollectedCount = collected.size;
+                    noProgressSince = Date.now();
+                    extraStepTried = false;
+                    continue;
+                }
+
+                if (Date.now() - noProgressSince < noProgressTimeoutMs) continue;
+                if (!extraStepTried) {
+                    extraStepTried = true;
+                    await scrollStep(1.02, 200);
+                    collectNow();
+                    if (collected.size > lastCollectedCount) {
+                        lastCollectedCount = collected.size;
+                        noProgressSince = Date.now();
+                        extraStepTried = false;
+                        continue;
+                    }
+                }
+                break;
+            }
+            collectNow();
+
+            const nodes = [...collected.values()]
+                .sort((a, b) => a.order - b.order)
+                .slice(0, targetCount);
             const ratings = [];
-            const items = nodes.map((n, i) => {
-                const ratingText = extractReviewRating(n);
-                const ratingNum = Number(String(ratingText).replace(',', '.'));
+            const items = nodes.map((row, i) => {
+                const ratingNum = Number(String(row.ratingText).replace(',', '.'));
                 if (Number.isFinite(ratingNum) && ratingNum > 0) ratings.push(ratingNum);
-                return `Отзыв ${i + 1} (${getDate(n)}): ${ratingText}★; ${getText(n).replace(/\s+/g, ' ')}`;
+                return `Отзыв ${i + 1} (${row.date}): ${row.ratingText}★; ${row.text}`;
             });
             const avgFromReviews = ratings.length ? (ratings.reduce((s, x) => s + x, 0) / ratings.length).toFixed(2) : '';
             const avg = avgFromInfo !== '—' ? avgFromInfo : (avgFromReviews || '—');
-            const header = `Отзывы (выгружено ${items.length}${declared ? ` из ${declared}` : ''}, средняя оценка: ${avg})`;
+            const declaredShown = Math.max(Number(declared) || 0, items.length);
+            const header = `Отзывы (выгружено ${items.length}${declaredShown ? ` из ${declaredShown}` : ''}, средняя оценка: ${avg})`;
             return { header, items };
         }
 
@@ -453,32 +750,62 @@
             return out.join('\n');
         };
 
+        const getOzonPidKey = () => {
+            const path = String(location.pathname || '');
+            const m = path.match(/\/product\/[^/]*?(\d{5,})(?:\/|$)/) || path.match(/\/product\/(\d{5,})(?:\/|$)/);
+            return m && m[1] ? `ozon:${m[1]}` : '';
+        };
+            const buildOzonExportPackage = async (opts = {}) => {
+                const includeReviews = opts.includeReviews !== false;
+                const switchToVariant = opts.switchToVariant === true;
+                const info = await collectInfo();
+                const requestedMax = Number(opts.maxReviews);
+                let maxReviews = Number.isFinite(requestedMax) && requestedMax > 0 ? Math.floor(requestedMax) : 100;
+                if (opts.maxReviews === 'all' || opts.allReviews === true) {
+                    maxReviews = Math.max(100, Number(info.reviewsTotal) || 5000);
+                }
+                const rev = includeReviews
+                    ? await loadReviews(maxReviews, { switchToVariant, avgRating: info.avgRating, reviewsTotal: info.reviewsTotal })
+                    : null;
+            const txt = buildOzonText(info, rev);
+            const name = slug(info.brand + ' ' + info.title) + '.txt';
+            return {
+                market: 'ozon',
+                pidKey: getOzonPidKey(),
+                url: info.url,
+                title: info.title,
+                filename: name,
+                text: txt,
+            };
+        };
+
         async function exportOzon(opts = {}) {
             try {
-                const includeReviews = opts.includeReviews !== false;
-                const switchToVariant = opts.switchToVariant !== false;
                 const copyOnly = !!opts.copyOnly;
-
-                const info = await collectInfo();
-                const rev = includeReviews
-                    ? await loadReviews(100, { switchToVariant, avgRating: info.avgRating, reviewsTotal: info.reviewsTotal })
-                    : null;
-                const txt = buildOzonText(info, rev);
-                const name = slug(info.brand + ' ' + info.title) + '.txt';
+                const pack = await buildOzonExportPackage(opts);
                 if (copyOnly) {
-                    await copyToClipboard(txt);
+                    await copyToClipboard(pack.text);
                     return;
                 }
-                downloadTextFile(name, txt);
+                downloadTextFile(pack.filename, pack.text);
             } catch (err) {
                 console.error('Ozon exporter:', err);
             }
         }
+        runtimeBridge.runExport = async (opts = {}) => {
+            const allReviews = opts.allReviews === true;
+            return buildOzonExportPackage({
+                includeReviews: opts.includeReviews !== false,
+                switchToVariant: false,
+                maxReviews: allReviews ? 'all' : opts.maxReviews,
+                allReviews,
+            });
+        };
         setInterval(() => {
             attachActionButtons(document.querySelector('[data-widget="webProductHeading"] h1'), 'ozon', [
-                { label: 'Скачать', kind: 'full', run: () => exportOzon({ includeReviews: true, switchToVariant: true }) },
+                { label: 'Скачать', kind: 'full', run: () => exportOzon({ includeReviews: true, switchToVariant: true, maxReviews: 100 }) },
                 { label: 'без отзывов', kind: 'lite', run: () => exportOzon({ includeReviews: false }) },
-                { label: 'все отзывы', kind: 'all', run: () => exportOzon({ includeReviews: true, switchToVariant: false }) },
+                { label: 'все отзывы', kind: 'all', run: () => exportOzon({ includeReviews: true, switchToVariant: false, maxReviews: 'all', allReviews: true }) },
                 { label: 'в буфер', kind: 'copy', run: () => exportOzon({ includeReviews: false, copyOnly: true }) },
             ]);
         }, 1000);
@@ -510,13 +837,17 @@
             return [...document.querySelectorAll('li.comments__item')].slice(0, max);
         }
 
-        async function exportWB(opts = {}) {
+        const getWBPidKey = () => {
+            const path = String(location.pathname || '');
+            const m = path.match(/\/catalog\/(\d{4,})\/detail/i) || path.match(/\/catalog\/(\d{4,})\/feedbacks/i);
+            return m && m[1] ? `wb:${m[1]}` : '';
+        };
+        async function buildWBExportPackage(opts = {}) {
             const includeReviews = opts.includeReviews !== false;
             const switchToVariant = opts.switchToVariant !== false;
-            const copyOnly = !!opts.copyOnly;
             const url = location.href;
             const header = document.querySelector('[class^="productHeaderWrap"], .product-page__header-wrap');
-            if (!header) return;
+            if (!header) throw new Error('Карточка WB не распознана');
 
             // Brand / Title
             const brand = (document.querySelector('[class^="productHeaderBrand"]')?.innerText || '—').trim();
@@ -645,13 +976,33 @@
             }
 
             const txt = lines.join('\n');
+            const fname = slug(brand + ' ' + title) + '.txt';
+            return {
+                market: 'wb',
+                pidKey: getWBPidKey(),
+                url,
+                title,
+                filename: fname,
+                text: txt,
+            };
+        }
+
+        async function exportWB(opts = {}) {
+            const copyOnly = !!opts.copyOnly;
+            const pack = await buildWBExportPackage(opts);
             if (copyOnly) {
-                await copyToClipboard(txt);
+                await copyToClipboard(pack.text);
                 return;
             }
-            const fname = slug(brand + ' ' + title) + '.txt';
-            downloadTextFile(fname, txt);
+            downloadTextFile(pack.filename, pack.text);
         }
+        runtimeBridge.runExport = async (opts = {}) => {
+            const allReviews = opts.allReviews === true;
+            return buildWBExportPackage({
+                includeReviews: opts.includeReviews !== false,
+                switchToVariant: allReviews ? false : true,
+            });
+        };
 
         // Mount action buttons near the title on WB (supports new hashed classes + old one)
         const wbTitleSelector = '[class^="productTitle"], [class*=" productTitle"], .product-page__title';
@@ -671,6 +1022,23 @@
     /* =========================================================
         ENTRY POINT
   ========================================================= */
+    if (hasRuntime()) {
+        chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+            if (!message || message.scope !== 'owb-export') return undefined;
+            if (String(message.action || '') !== 'export-card') return undefined;
+            (async () => {
+                if (!runtimeBridge.runExport) throw new Error('Экспорт на текущей вкладке недоступен');
+                const data = await runtimeBridge.runExport(message.options || {});
+                return data;
+            })().then((data) => {
+                sendResponse({ ok: true, data });
+            }).catch((err) => {
+                sendResponse({ ok: false, error: String(err && err.message ? err.message : err) });
+            });
+            return true;
+        });
+    }
+
     const host = String(location.hostname || '').toLowerCase();
     if (host.includes('ozon')) {
         initOzon();
