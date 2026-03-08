@@ -4,12 +4,18 @@
 
 ## Что внутри
 
-- `content/exporter.js` - перенос `Product-card-extract-OZON-WB.user.js`
-- `content/price-monitor.js` - сбор цен + график + бейджи минимума на карточках
+- `content/exporter/common.js` - общий runtime bridge + UI кнопок экспорта
+- `content/exporter/ozon.js` - экспорт карточки Ozon (инфо/характеристики/отзывы)
+- `content/exporter/wb.js` - экспорт карточки Wildberries
+- `content/price-monitor/common.js` - общий монитор цены, график, бейджи минимума, bridge
+- `content/price-monitor/ozon.js` - селекторы/парсинг/детектор товара для Ozon
+- `content/price-monitor/wb.js` - селекторы/парсинг/детектор товара для Wildberries
 - `content/mp-core.js` - общий core с адаптацией `GM_*` в bridge расширения
 - `background/service-worker.js` - storage API, IndexedDB истории цен, экспорт/импорт, сетевые JSON-запросы, двунаправленный sync с сервером
 - `popup/` - быстрый статус и настройки
 - `options/` - дефолты + экспорт/импорт всей БД расширения
+
+`manifest.json` разделяет content scripts по площадкам: код Ozon внедряется только на Ozon, код WB только на WB.
 
 ## Источники, откуда перенесено
 

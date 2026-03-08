@@ -57,7 +57,19 @@
         "*://*.ozon.uz/*",
         "*://*.ozon.am/*",
         "*://*.ozon.kg/*",
-        "*://*.ozon.ge/*",
+        "*://*.ozon.ge/*"
+      ],
+      "js": [
+        "content/mp-core.js",
+        "content/exporter/common.js",
+        "content/exporter/ozon.js",
+        "content/price-monitor/common.js",
+        "content/price-monitor/ozon.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
         "*://*.wildberries.ru/*",
         "*://*.wildberries.by/*",
         "*://*.wildberries.kz/*",
@@ -69,8 +81,10 @@
       ],
       "js": [
         "content/mp-core.js",
-        "content/exporter.js",
-        "content/price-monitor.js"
+        "content/exporter/common.js",
+        "content/exporter/wb.js",
+        "content/price-monitor/common.js",
+        "content/price-monitor/wb.js"
       ],
       "run_at": "document_idle"
     }
