@@ -1413,6 +1413,50 @@ const runWindowExportBatch = async (opts = {}) => {
     }
 
     const combinedText = buildCombinedText(successes);
+    const clipboard = {
+        attempted: false,
+        ok: false,
+        error: '',
+        viaTabId: null,
+    };
+    if (mode === 'copy' && combinedText) {
+        clipboard.attempted = true;
+        const candidateTabIds = [];
+        const seenTabIds = new Set();
+        const pushCandidate = (tabId) => {
+            const n = Number(tabId);
+            if (!Number.isFinite(n)) return;
+            if (seenTabIds.has(n)) return;
+            seenTabIds.add(n);
+            candidateTabIds.push(n);
+        };
+        pushCandidate(originalActive && originalActive.id);
+        successes.forEach((item) => pushCandidate(item.tabId));
+
+        let lastError = '';
+        for (let i = 0; i < candidateTabIds.length; i += 1) {
+            const tabId = candidateTabIds[i];
+            try {
+                const response = await sendMessageToTab(tabId, {
+                    scope: 'owb-export',
+                    action: 'copy-text',
+                    payload: {
+                        text: combinedText,
+                    },
+                });
+                if (response && response.ok) {
+                    clipboard.ok = true;
+                    clipboard.viaTabId = tabId;
+                    lastError = '';
+                    break;
+                }
+                lastError = String((response && response.error) || 'Clipboard write failed');
+            } catch (err) {
+                lastError = String(err && err.message ? err.message : err);
+            }
+        }
+        clipboard.error = lastError;
+    }
     const maxStoredChars = 900000;
     const storedText = combinedText.length > maxStoredChars
         ? `${combinedText.slice(0, maxStoredChars)}\n\n[...ОБРЕЗАНО ДЛЯ ХРАНЕНИЯ В СЕССИИ...]`
@@ -1440,6 +1484,7 @@ const runWindowExportBatch = async (opts = {}) => {
     return {
         ...session,
         combinedText,
+        clipboard,
     };
 };
 

@@ -181,8 +181,13 @@ button.compact {
 
 .meta-line {
   color: #5f6b7a;
-  margin-top: 1px;
+  margin-top: 0;
   word-break: break-word;
+}
+
+.status-line:empty,
+.meta-line:empty {
+  display: none;
 }
 
 .link-btn {

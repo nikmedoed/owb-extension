@@ -358,13 +358,33 @@ const runWindowBatchExport = async (options = {}) => {
             windowId,
         });
         const combinedText = String(result && result.combinedText ? result.combinedText : '');
-        if (mode === 'copy' && combinedText) {
-            await copyTextToClipboard(combinedText);
+        let copyOk = mode !== 'copy';
+        let copyError = '';
+        if (mode === 'copy') {
+            copyOk = !!(result && result.clipboard && result.clipboard.ok);
+            copyError = String(result && result.clipboard && result.clipboard.error ? result.clipboard.error : '');
+            if (!copyOk && combinedText) {
+                try {
+                    await copyTextToClipboard(combinedText);
+                    copyOk = true;
+                    copyError = '';
+                } catch (err) {
+                    copyError = String(err && err.message ? err.message : err);
+                }
+            }
+            if (!copyOk && !copyError) {
+                copyError = 'неизвестная ошибка записи в буфер';
+            }
         }
         renderLastSession(result || null);
         const success = Number(result && result.successCount) || 0;
         const total = Number(result && result.totalTabs) || 0;
         const fails = Number(result && result.failCount) || 0;
+        if (mode === 'copy' && !copyOk) {
+            const details = `собрано, но не скопировано в буфер${copyError ? `: ${copyError}` : ''}${fails ? `, ошибок: ${fails}` : ''}`;
+            setStatus(`Готово: ${success}/${total} карточек`, details, true);
+            return;
+        }
         const actionText = mode === 'copy' ? 'скопировано в буфер' : 'скачано файлами';
         setStatus(`Готово: ${success}/${total} карточек`, `${actionText}${fails ? `, ошибок: ${fails}` : ''}`, fails > 0);
     } catch (err) {

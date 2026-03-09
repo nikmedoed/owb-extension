@@ -93,8 +93,14 @@
     if (hasRuntime()) {
         chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             if (!message || message.scope !== 'owb-export') return undefined;
-            if (String(message.action || '') !== 'export-card') return undefined;
+            const action = String(message.action || '');
+            if (action !== 'export-card' && action !== 'copy-text') return undefined;
             (async () => {
+                if (action === 'copy-text') {
+                    const text = String(message.payload && message.payload.text ? message.payload.text : '');
+                    await copyToClipboard(text);
+                    return { copied: true };
+                }
                 if (typeof state.runExport !== 'function') throw new Error('Экспорт на текущей вкладке недоступен');
                 return state.runExport(message.options || {});
             })().then((data) => {
