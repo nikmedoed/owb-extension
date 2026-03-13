@@ -9,13 +9,17 @@
 <body>
   <main class="app">
     <header class="head">
-      <img src="../icons/icon32.png" alt="" width="24" height="24">
-      <h1>OWB Tools</h1>
+      <div class="head-left">
+        <img src="../icons/icon32.png" alt="" width="24" height="24">
+        <h1>OWB Tools</h1>
+      </div>
+      <button id="openOptionsBtn" class="icon-btn" type="button" title="Настройки расширения" aria-label="Настройки расширения">⚙</button>
     </header>
 
     <section class="batch-card">
       <p class="batch-title">Массовая выгрузка (текущее окно)</p>
       <div class="batch-actions">
+        <button id="closeDuplicatesBtn" type="button" class="alt danger-soft">Закрыть повторы в окне</button>
         <button id="batchDownloadBtn" type="button">Скачать карточки в окне</button>
         <button id="batchDownloadAllBtn" type="button" class="alt">Скачать: все отзывы</button>
         <button id="batchCopyBtn" type="button">Копировать в буфер (окно)</button>
@@ -31,7 +35,7 @@
         <p class="batch-title">Последняя сессия извлечения</p>
         <button id="copyLastSessionBtn" type="button" class="alt compact">Скопировать</button>
       </div>
-      <textarea id="lastSessionText" rows="5" readonly placeholder="Здесь появится текст последней выгрузки..."></textarea>
+      <textarea id="lastSessionText" rows="4" readonly placeholder="Здесь появится текст последней выгрузки..."></textarea>
     </section>
 
     <section id="quickChart" class="chart-card" hidden>
@@ -43,8 +47,6 @@
       <canvas id="chartCanvas" width="296" height="96"></canvas>
       <p id="chartHint" class="meta-line"></p>
     </section>
-
-    <button id="openOptionsBtn" class="link-btn" type="button">Открыть настройки расширения</button>
   </main>
   <script src="popup.js"></script>
 </body>

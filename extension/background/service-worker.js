@@ -1280,6 +1280,23 @@ const tabsGet = (tabId) => new Promise((resolve, reject) => {
         resolve(tab || null);
     });
 });
+const tabsRemove = (tabIds) => new Promise((resolve, reject) => {
+    const ids = (Array.isArray(tabIds) ? tabIds : [tabIds])
+        .map((v) => Number(v))
+        .filter((v) => Number.isFinite(v));
+    if (!ids.length) {
+        resolve(true);
+        return;
+    }
+    chrome.tabs.remove(ids, () => {
+        const err = chrome.runtime.lastError;
+        if (err) {
+            reject(new Error(err.message || 'Cannot remove tabs'));
+            return;
+        }
+        resolve(true);
+    });
+});
 const sendMessageToTab = (tabId, message) => new Promise((resolve, reject) => {
     chrome.tabs.sendMessage(tabId, message, (response) => {
         const err = chrome.runtime.lastError;
@@ -1342,6 +1359,130 @@ const collectWindowProductTabs = async (windowId = null) => {
     return tabs
         .map((tab) => ({ tab, product: parseMarketProductFromUrl(tab.url) }))
         .filter((item) => !!item.product && Number.isFinite(Number(item.tab && item.tab.id)));
+};
+const normalizeTabUrl = (url) => {
+    try {
+        const u = new URL(String(url || ''));
+        if (!/^https?:$/i.test(u.protocol)) return '';
+        u.hash = '';
+        return u.toString();
+    } catch (_) {
+        return '';
+    }
+};
+const isMarketTabUrl = (url) => {
+    try {
+        const u = new URL(String(url || ''));
+        return /^https?:$/i.test(u.protocol) && MARKET_HOST_RE.test(String(u.hostname || '').toLowerCase());
+    } catch (_) {
+        return false;
+    }
+};
+const requestCurrentProductFromTab = async (tabId) => {
+    try {
+        const response = await sendMessageToTab(tabId, { scope: 'owb', action: 'monitor:get-current-product' });
+        if (!response || !response.ok || !response.data || typeof response.data !== 'object') return null;
+        const pidKey = String(response.data.pidKey || '').trim();
+        if (!pidKey) return null;
+        return {
+            market: String(response.data.market || '').trim().toLowerCase(),
+            pid: String(response.data.pid || '').trim(),
+            pidKey,
+        };
+    } catch (_) {
+        return null;
+    }
+};
+const closeDuplicateTabsInWindow = async (opts = {}) => {
+    const queryInfo = (Number.isFinite(Number(opts.windowId)) && Number(opts.windowId) >= 0)
+        ? { windowId: Number(opts.windowId) }
+        : { currentWindow: true };
+    const tabs = await tabsQuery(queryInfo);
+    if (!tabs.length) {
+        return {
+            totalTabs: 0,
+            consideredTabs: 0,
+            duplicateGroups: 0,
+            keptCount: 0,
+            closedCount: 0,
+            byPidKey: 0,
+            byUrlKey: 0,
+            closedTabIds: [],
+        };
+    }
+
+    const candidates = tabs
+        .filter((tab) => Number.isFinite(Number(tab && tab.id)))
+        .map((tab) => {
+            const fromUrl = parseMarketProductFromUrl(tab.url || '');
+            return {
+                tabId: Number(tab.id),
+                index: Number.isFinite(Number(tab.index)) ? Number(tab.index) : Number.MAX_SAFE_INTEGER,
+                active: tab.active === true,
+                urlKey: normalizeTabUrl(tab.url || ''),
+                pidKey: fromUrl && fromUrl.pidKey ? String(fromUrl.pidKey) : '',
+                market: fromUrl && fromUrl.market ? String(fromUrl.market) : '',
+                isMarketTab: isMarketTabUrl(tab.url || ''),
+            };
+        });
+
+    const needDetector = candidates.filter((item) => !item.pidKey && item.isMarketTab);
+    if (needDetector.length) {
+        const detected = await Promise.all(needDetector.map((item) => requestCurrentProductFromTab(item.tabId)));
+        for (let i = 0; i < needDetector.length; i += 1) {
+            const d = detected[i];
+            if (!d || !d.pidKey) continue;
+            needDetector[i].pidKey = d.pidKey;
+        }
+    }
+
+    const keyToTabs = new Map();
+    let consideredTabs = 0;
+    let byPidKey = 0;
+    let byUrlKey = 0;
+    candidates.forEach((item) => {
+        let dedupeKey = '';
+        if (item.pidKey) {
+            dedupeKey = `pid:${item.pidKey}`;
+            byPidKey += 1;
+        } else if (item.urlKey) {
+            dedupeKey = `url:${item.urlKey}`;
+            byUrlKey += 1;
+        }
+        if (!dedupeKey) return;
+        consideredTabs += 1;
+        if (!keyToTabs.has(dedupeKey)) keyToTabs.set(dedupeKey, []);
+        keyToTabs.get(dedupeKey).push(item);
+    });
+
+    const toCloseIds = [];
+    let duplicateGroups = 0;
+    let keptCount = 0;
+    for (const group of keyToTabs.values()) {
+        if (!Array.isArray(group) || group.length <= 1) continue;
+        duplicateGroups += 1;
+        const sorted = group.slice().sort((a, b) => a.index - b.index);
+        const keep = sorted.find((tab) => tab.active) || sorted[0];
+        keptCount += 1;
+        sorted.forEach((tab) => {
+            if (tab.tabId !== keep.tabId) toCloseIds.push(tab.tabId);
+        });
+    }
+
+    if (toCloseIds.length) {
+        await tabsRemove(toCloseIds);
+    }
+
+    return {
+        totalTabs: tabs.length,
+        consideredTabs,
+        duplicateGroups,
+        keptCount,
+        closedCount: toCloseIds.length,
+        byPidKey,
+        byUrlKey,
+        closedTabIds: toCloseIds,
+    };
 };
 const buildCombinedText = (items) => items
     .map((item, idx) => {
@@ -1557,6 +1698,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             return { ok: true, data: await runWindowExportBatch(message.payload || {}) };
         case 'owb:batch-get-last-session':
             return { ok: true, data: await getLastExtractSession() };
+        case 'owb:tabs-close-duplicates':
+            return { ok: true, data: await closeDuplicateTabsInWindow(message.payload || {}) };
         default:
             return { ok: false, error: `Unknown message type: ${message.type}` };
         }

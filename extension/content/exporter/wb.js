@@ -250,9 +250,9 @@
         setInterval(() => {
             attachActionButtons(document.querySelector(wbTitleSelector), 'wb', [
                 { label: 'Скачать', kind: 'full', run: () => exportWB({ includeReviews: true, switchToVariant: true }) },
-                { label: 'без отзывов', kind: 'lite', run: () => exportWB({ includeReviews: false }) },
                 { label: 'все отзывы', kind: 'all', run: () => exportWB({ includeReviews: true, switchToVariant: false }) },
                 { label: 'в буфер', kind: 'copy', run: () => exportWB({ includeReviews: false, copyOnly: true }) },
+                { label: 'в буфер с отзывами', kind: 'copy_all', run: () => exportWB({ includeReviews: true, switchToVariant: true, copyOnly: true }) },
             ]);
         }, 1000);
 

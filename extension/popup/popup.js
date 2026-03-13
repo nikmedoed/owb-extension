@@ -13,6 +13,7 @@ const batchDownloadBtn = document.getElementById('batchDownloadBtn');
 const batchDownloadAllBtn = document.getElementById('batchDownloadAllBtn');
 const batchCopyBtn = document.getElementById('batchCopyBtn');
 const batchCopyAllBtn = document.getElementById('batchCopyAllBtn');
+const closeDuplicatesBtn = document.getElementById('closeDuplicatesBtn');
 const batchMetaLineEl = document.getElementById('batchMetaLine');
 const lastSessionTextEl = document.getElementById('lastSessionText');
 const copyLastSessionBtn = document.getElementById('copyLastSessionBtn');
@@ -65,6 +66,7 @@ const withBusy = (busy) => {
     if (batchDownloadAllBtn) batchDownloadAllBtn.disabled = busy;
     if (batchCopyBtn) batchCopyBtn.disabled = busy;
     if (batchCopyAllBtn) batchCopyAllBtn.disabled = busy;
+    if (closeDuplicatesBtn) closeDuplicatesBtn.disabled = busy;
     if (copyLastSessionBtn) copyLastSessionBtn.disabled = busy;
     updateResetButtonState(busy);
 };
@@ -122,6 +124,7 @@ const callMonitor = async (action, payload = null) => {
         'monitor:get-status': 'owb:price-get-status',
         'batch:run-window-export': 'owb:batch-run-window-export',
         'batch:get-last-session': 'owb:batch-get-last-session',
+        'tabs:close-duplicates': 'owb:tabs-close-duplicates',
     };
     const type = actionMap[action];
     if (!type) throw new Error('Неизвестное действие');
@@ -394,6 +397,34 @@ const runWindowBatchExport = async (options = {}) => {
     }
 };
 
+const closeDuplicatesInWindow = async () => {
+    const activeTab = await getActiveTab();
+    const windowId = activeTab && Number.isFinite(Number(activeTab.windowId)) ? Number(activeTab.windowId) : null;
+
+    withBusy(true);
+    setStatus('Ищу повторы во вкладках...');
+    setBatchMeta('Приоритет: магазин + артикул, затем одинаковая ссылка');
+    try {
+        const result = await callMonitor('tabs:close-duplicates', { windowId });
+        const closedCount = Number(result && result.closedCount) || 0;
+        const duplicateGroups = Number(result && result.duplicateGroups) || 0;
+        const byPidKey = Number(result && result.byPidKey) || 0;
+        const byUrlKey = Number(result && result.byUrlKey) || 0;
+        const consideredTabs = Number(result && result.consideredTabs) || 0;
+        const totalTabs = Number(result && result.totalTabs) || 0;
+
+        if (closedCount <= 0) {
+            setStatus('Повторы не найдены', `Проверено ${consideredTabs}/${totalTabs} вкладок`);
+            return;
+        }
+        setStatus(`Закрыто повторов: ${closedCount}`, `Групп: ${duplicateGroups} · ключей по артикулу: ${byPidKey} · по URL: ${byUrlKey}`);
+    } catch (err) {
+        setStatus(String(err && err.message ? err.message : err), '', true);
+    } finally {
+        withBusy(false);
+    }
+};
+
 if (batchDownloadBtn) {
     batchDownloadBtn.addEventListener('click', () => {
         runWindowBatchExport({ mode: 'download', allReviews: false }).catch((err) => {
@@ -418,6 +449,13 @@ if (batchCopyBtn) {
 if (batchCopyAllBtn) {
     batchCopyAllBtn.addEventListener('click', () => {
         runWindowBatchExport({ mode: 'copy', allReviews: true }).catch((err) => {
+            setStatus(String(err && err.message ? err.message : err), '', true);
+        });
+    });
+}
+if (closeDuplicatesBtn) {
+    closeDuplicatesBtn.addEventListener('click', () => {
+        closeDuplicatesInWindow().catch((err) => {
             setStatus(String(err && err.message ? err.message : err), '', true);
         });
     });

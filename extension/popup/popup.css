@@ -11,12 +11,19 @@ body {
 }
 
 .app {
-  padding: 8px;
+  padding: 7px;
   display: grid;
-  gap: 6px;
+  gap: 5px;
 }
 
 .head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 26px;
+}
+
+.head-left {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -77,6 +84,12 @@ button.alt {
   color: #223046;
 }
 
+button.danger-soft {
+  border-color: #d92d20;
+  background: #fff5f5;
+  color: #b42318;
+}
+
 button:disabled {
   opacity: 0.6;
   cursor: default;
@@ -85,10 +98,10 @@ button:disabled {
 .batch-card {
   border: 1px solid #d1dae5;
   border-radius: 8px;
-  padding: 6px;
+  padding: 5px;
   background: #fff;
   display: grid;
-  gap: 5px;
+  gap: 4px;
 }
 
 .batch-title {
@@ -112,7 +125,7 @@ button:disabled {
 
 textarea#lastSessionText {
   width: 100%;
-  min-height: 80px;
+  min-height: 72px;
   resize: vertical;
   box-sizing: border-box;
   border: 1px solid #c7d1dc;
@@ -125,7 +138,7 @@ textarea#lastSessionText {
 .chart-card {
   border: 1px solid #d1dae5;
   border-radius: 8px;
-  padding: 6px;
+  padding: 5px;
   background: #fff;
   display: grid;
   gap: 3px;
@@ -190,11 +203,20 @@ button.compact {
   display: none;
 }
 
-.link-btn {
-  justify-self: start;
-  border: 0;
-  background: transparent;
-  color: #215fcb;
+.icon-btn {
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  border-radius: 6px;
+  border: 1px solid #97a8bf;
+  background: #fff;
+  color: #223046;
   padding: 0;
-  text-decoration: underline;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.icon-btn:hover {
+  border-color: #2766d4;
+  color: #1f4ea8;
 }
