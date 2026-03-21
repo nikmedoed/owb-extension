@@ -41,6 +41,31 @@
         if (!ok) throw new Error('Clipboard write failed');
         return true;
     };
+    const saveLastExtractSessionFromItem = async (item, options = {}) => {
+        if (!hasRuntime() || !item || typeof item !== 'object') return false;
+        const payload = {
+            mode: options.mode === 'copy' ? 'copy' : 'download',
+            allReviews: options.allReviews === true,
+            tabId: Number.isFinite(Number(options.tabId)) ? Number(options.tabId) : null,
+            item: {
+                market: String(item.market || ''),
+                pidKey: String(item.pidKey || ''),
+                url: String(item.url || ''),
+                title: String(item.title || ''),
+                filename: String(item.filename || ''),
+                text: String(item.text || ''),
+            },
+        };
+        return new Promise((resolve) => {
+            chrome.runtime.sendMessage({ type: 'owb:extract-save-last-session', payload }, (response) => {
+                if (chrome.runtime.lastError) {
+                    resolve(false);
+                    return;
+                }
+                resolve(!!(response && response.ok));
+            });
+        });
+    };
 
     const attachActionButtons = (anchor, key, actions) => {
         if (!anchor || !anchor.parentElement || !Array.isArray(actions) || !actions.length) return;
@@ -63,6 +88,27 @@
                 btn.textContent = original;
             }, 1100);
         };
+        const showNotice = (() => {
+            let el = null;
+            let timer = null;
+            return (text, isError = false) => {
+                const msg = String(text || '').trim();
+                if (!msg) return;
+                if (!el) {
+                    el = document.createElement('div');
+                    el.className = 'mp-export-notice';
+                    el.style.cssText = 'position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:2147483647;max-width:min(90vw,560px);padding:9px 12px;border-radius:10px;background:rgba(24,28,33,.94);color:#fff;font:600 13px/1.3 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.26);pointer-events:none;opacity:0;transition:opacity .16s ease;';
+                    document.body.appendChild(el);
+                }
+                el.textContent = msg;
+                el.style.background = isError ? 'rgba(176,43,43,.96)' : 'rgba(24,28,33,.94)';
+                el.style.opacity = '1';
+                if (timer) clearTimeout(timer);
+                timer = setTimeout(() => {
+                    if (el) el.style.opacity = '0';
+                }, 1500);
+            };
+        })();
 
         actions.forEach((action) => {
             const btn = document.createElement('button');
@@ -74,13 +120,15 @@
                 if (wrap.dataset.busy === '1') return;
                 const original = btn.textContent;
                 setBusy(true);
-                btn.textContent = '...';
+                btn.textContent = String(action.pendingText || '...');
                 try {
                     await action.run();
-                    flash(btn, original, 'Готово');
+                    flash(btn, original, String(action.successText || 'Готово'));
+                    if (action.toastSuccess) showNotice(String(action.toastSuccess || ''));
                 } catch (err) {
                     console.error('Export action failed:', err);
-                    flash(btn, original, 'Ошибка');
+                    flash(btn, original, String(action.errorText || 'Ошибка'));
+                    if (action.toastError) showNotice(String(action.toastError || ''), true);
                 } finally {
                     setBusy(false);
                 }
@@ -117,6 +165,7 @@
         hasRuntime,
         attachActionButtons,
         copyToClipboard,
+        saveLastExtractSessionFromItem,
         setRunExport: (handler) => {
             state.runExport = typeof handler === 'function' ? handler : null;
         },

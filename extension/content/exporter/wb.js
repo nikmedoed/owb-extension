@@ -16,6 +16,7 @@
     const {
         attachActionButtons,
         copyToClipboard,
+        saveLastExtractSessionFromItem,
         setRunExport,
     } = Exporter;
 
@@ -233,9 +234,17 @@
             const pack = await buildWBExportPackage(opts);
             if (copyOnly) {
                 await copyToClipboard(pack.text);
+                await saveLastExtractSessionFromItem(pack, {
+                    mode: 'copy',
+                    allReviews: opts.includeReviews !== false,
+                });
                 return;
             }
             downloadTextFile(pack.filename, pack.text);
+            await saveLastExtractSessionFromItem(pack, {
+                mode: 'download',
+                allReviews: opts.includeReviews !== false,
+            });
         }
         setRunExport(async (opts = {}) => {
             const allReviews = opts.allReviews === true;
@@ -251,8 +260,8 @@
             attachActionButtons(document.querySelector(wbTitleSelector), 'wb', [
                 { label: 'Скачать', kind: 'full', run: () => exportWB({ includeReviews: true, switchToVariant: true }) },
                 { label: 'все отзывы', kind: 'all', run: () => exportWB({ includeReviews: true, switchToVariant: false }) },
-                { label: 'в буфер', kind: 'copy', run: () => exportWB({ includeReviews: false, copyOnly: true }) },
-                { label: 'в буфер с отзывами', kind: 'copy_all', run: () => exportWB({ includeReviews: true, switchToVariant: true, copyOnly: true }) },
+                { label: 'в буфер', kind: 'copy', pendingText: 'Копирую...', successText: 'Скопировано', toastSuccess: 'Скопировано в буфер', run: () => exportWB({ includeReviews: false, copyOnly: true }) },
+                { label: 'в буфер с отзывами', kind: 'copy_all', pendingText: 'Копирую...', successText: 'Скопировано', toastSuccess: 'Скопировано в буфер', run: () => exportWB({ includeReviews: true, switchToVariant: true, copyOnly: true }) },
             ]);
         }, 1000);
 

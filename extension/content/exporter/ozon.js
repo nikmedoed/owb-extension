@@ -16,6 +16,7 @@
     const {
         attachActionButtons,
         copyToClipboard,
+        saveLastExtractSessionFromItem,
         setRunExport,
     } = Exporter;
 
@@ -864,9 +865,17 @@
                 const pack = await buildOzonExportPackage(opts);
                 if (copyOnly) {
                     await copyToClipboard(pack.text);
+                    await saveLastExtractSessionFromItem(pack, {
+                        mode: 'copy',
+                        allReviews: opts.includeReviews !== false,
+                    });
                     return;
                 }
                 downloadTextFile(pack.filename, pack.text);
+                await saveLastExtractSessionFromItem(pack, {
+                    mode: 'download',
+                    allReviews: opts.includeReviews !== false,
+                });
             } catch (err) {
                 console.error('Ozon exporter:', err);
             }
@@ -882,8 +891,8 @@
             attachActionButtons(document.querySelector('[data-widget="webProductHeading"] h1'), 'ozon', [
                 { label: 'Скачать', kind: 'full', run: () => exportOzon({ includeReviews: true, switchToVariant: true, maxReviews: 100 }) },
                 { label: 'все отзывы', kind: 'all', run: () => exportOzon({ includeReviews: true, switchToVariant: false, maxReviews: 100 }) },
-                { label: 'в буфер', kind: 'copy', run: () => exportOzon({ includeReviews: false, copyOnly: true }) },
-                { label: 'в буфер с отзывами', kind: 'copy_all', run: () => exportOzon({ includeReviews: true, switchToVariant: true, copyOnly: true, maxReviews: 100 }) },
+                { label: 'в буфер', kind: 'copy', pendingText: 'Копирую...', successText: 'Скопировано', toastSuccess: 'Скопировано в буфер', run: () => exportOzon({ includeReviews: false, copyOnly: true }) },
+                { label: 'в буфер с отзывами', kind: 'copy_all', pendingText: 'Копирую...', successText: 'Скопировано', toastSuccess: 'Скопировано в буфер', run: () => exportOzon({ includeReviews: true, switchToVariant: true, copyOnly: true, maxReviews: 100 }) },
             ]);
         }, 1000);
 

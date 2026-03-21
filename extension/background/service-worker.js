@@ -1495,6 +1495,34 @@ const getLastExtractSession = async () => {
     const raw = await storageGet([LAST_EXTRACT_SESSION_KEY]);
     return raw[LAST_EXTRACT_SESSION_KEY] || null;
 };
+const saveLastExtractSession = async (payload = {}) => {
+    const item = payload && typeof payload.item === 'object' ? payload.item : {};
+    const text = String(item.text || '');
+    const mode = payload.mode === 'copy' ? 'copy' : 'download';
+    const nowTs = now();
+    const title = String(item.title || item.pidKey || item.url || 'card').trim();
+    const session = {
+        createdAt: nowTs,
+        mode,
+        allReviews: payload.allReviews === true,
+        totalTabs: 1,
+        successCount: 1,
+        failCount: 0,
+        failures: [],
+        items: [{
+            tabId: Number.isFinite(Number(payload.tabId)) ? Number(payload.tabId) : null,
+            market: String(item.market || ''),
+            pidKey: String(item.pidKey || ''),
+            title,
+            url: String(item.url || ''),
+            filename: String(item.filename || ''),
+        }],
+        text,
+        storedTruncated: false,
+    };
+    await storageSet({ [LAST_EXTRACT_SESSION_KEY]: session });
+    return session;
+};
 const runWindowExportBatch = async (opts = {}) => {
     const mode = opts.mode === 'copy' ? 'copy' : 'download';
     const allReviews = opts.allReviews === true;
@@ -1698,6 +1726,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             return { ok: true, data: await runWindowExportBatch(message.payload || {}) };
         case 'owb:batch-get-last-session':
             return { ok: true, data: await getLastExtractSession() };
+        case 'owb:extract-save-last-session':
+            return { ok: true, data: await saveLastExtractSession(message.payload || {}) };
         case 'owb:tabs-close-duplicates':
             return { ok: true, data: await closeDuplicateTabsInWindow(message.payload || {}) };
         default:
