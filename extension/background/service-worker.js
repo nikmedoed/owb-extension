@@ -27,6 +27,13 @@ const SYNC_CFG = {
     historyFetchTtlMs: 15000,
 };
 const DEFAULT_SERVER_URL = 'http://127.0.0.1:8765';
+const PRODUCT_SUMMARY_VERSION = 2;
+const WB_OUTLIER_CFG = {
+    minNeighborRatio: 2.5,
+    maxNeighborSpread: 1.25,
+    maxDurationMs: 12 * 60 * 60 * 1000,
+    maxRelativeDuration: 0.35,
+};
 
 const sanitizeFilename = (name) => {
     const base = String(name || DEFAULT_DOWNLOAD_NAME).trim() || DEFAULT_DOWNLOAD_NAME;
@@ -375,6 +382,7 @@ const capturePriceBatch = async (records) => {
     }
 
     await txDone(tx);
+    await rebuildProductSummaries([...dirtyStates]);
     return {
         captured: clean.length,
         created,
@@ -412,6 +420,7 @@ const getIntervalsByPid = async (pidKey, limit = 2000) => {
 const getMinBatch = async (pidKeys) => {
     const keys = [...new Set((Array.isArray(pidKeys) ? pidKeys : []).map((k) => String(k || '').trim()).filter(Boolean))];
     if (!keys.length) return {};
+    await ensureProductSummaries(keys);
     const db = await openPriceDb();
     const tx = db.transaction(PRICE_DB.products, 'readonly');
     const store = tx.objectStore(PRICE_DB.products);
@@ -512,9 +521,8 @@ const upsertIntervalsFromSync = async (records) => {
     if (!normalized.length) return { accepted: 0, inserted: 0, merged: 0, updated: 0, products: 0 };
 
     const db = await openPriceDb();
-    const tx = db.transaction([PRICE_DB.intervals, PRICE_DB.products], 'readwrite');
+    const tx = db.transaction(PRICE_DB.intervals, 'readwrite');
     const intervalsStore = tx.objectStore(PRICE_DB.intervals);
-    const productsStore = tx.objectStore(PRICE_DB.products);
     const idxByPid = intervalsStore.index('byPidFirst');
 
     const intervalsByPid = new Map();
@@ -632,55 +640,8 @@ const upsertIntervalsFromSync = async (records) => {
 
         affectedPidKeys.add(rec.pidKey);
     }
-
-    for (const pidKey of affectedPidKeys) {
-        const list = (await loadPidIntervals(pidKey)).slice().sort((a, b) => {
-            const byLast = toInt(a.lastTs, 0) - toInt(b.lastTs, 0);
-            if (byLast !== 0) return byLast;
-            return toInt(a.firstTs, 0) - toInt(b.firstTs, 0);
-        });
-        if (!list.length) {
-            productsStore.delete(pidKey);
-            continue;
-        }
-        const prev = await idbReq(productsStore.get(pidKey));
-        const latest = list[list.length - 1];
-        let minInterval = list[0];
-        list.forEach((item) => {
-            if (Number(item.price) < Number(minInterval.price)) minInterval = item;
-            else if (eq(item.price, minInterval.price) && toInt(item.firstTs, 0) < toInt(minInterval.firstTs, 0)) minInterval = item;
-        });
-        const minPriceValue = Number(minInterval.price);
-        let minFirstTs = toInt(minInterval.firstTs, 0);
-        let minLastTs = toInt(minInterval.lastTs, 0);
-        list.forEach((item) => {
-            if (!eq(item.price, minPriceValue)) return;
-            minFirstTs = Math.min(minFirstTs, toInt(item.firstTs, 0));
-            minLastTs = Math.max(minLastTs, toInt(item.lastTs, 0));
-        });
-        productsStore.put({
-            pidKey,
-            pid: String(latest.pid || prev?.pid || ''),
-            market: String(latest.market || pidKey.split(':')[0] || prev?.market || ''),
-            createdAt: toInt(prev?.createdAt, now()),
-            updatedAt: Math.max(
-                ...list.map((item) => toInt(item.updatedAt, 0)),
-                toInt(prev?.updatedAt, 0),
-                now(),
-            ),
-            lastIntervalKey: String(latest.key || ''),
-            lastPrice: Number(latest.price),
-            lastCurrency: String(latest.currency || ''),
-            lastTs: toInt(latest.lastTs, 0),
-            minPrice: minPriceValue,
-            minCurrency: String(minInterval.currency || ''),
-            minIntervalKey: String(minInterval.key || ''),
-            minFirstTs,
-            minLastTs,
-        });
-    }
-
     await txDone(tx);
+    await rebuildProductSummaries([...affectedPidKeys]);
     return {
         accepted: normalized.length,
         inserted,
@@ -747,6 +708,166 @@ const resolveMarket = (value, pidKey = '') => {
     const prefix = String(pidKey || '').split(':')[0].trim().toLowerCase();
     if (prefix === 'ozon' || prefix === 'wb') return prefix;
     return 'unknown';
+};
+
+const sortIntervalsForPid = (rows) => [...(Array.isArray(rows) ? rows : [])]
+    .filter(Boolean)
+    .sort((a, b) => {
+        const byFirst = toInt(a.firstTs, 0) - toInt(b.firstTs, 0);
+        if (byFirst !== 0) return byFirst;
+        const byLast = toInt(a.lastTs, 0) - toInt(b.lastTs, 0);
+        if (byLast !== 0) return byLast;
+        return String(a.key || '').localeCompare(String(b.key || ''));
+    });
+
+const isWbOutlierInterval = (intervals, index, market) => {
+    if (resolveMarket(market, intervals[index]?.pidKey) !== 'wb') return false;
+    if (index <= 0 || index >= intervals.length - 1) return false;
+
+    const current = intervals[index];
+    const prev = intervals[index - 1];
+    const next = intervals[index + 1];
+    if (!current || !prev || !next) return false;
+
+    const currency = String(current.currency || '');
+    if (String(prev.currency || '') !== currency || String(next.currency || '') !== currency) return false;
+
+    const currentPrice = Number(current.price);
+    const prevPrice = Number(prev.price);
+    const nextPrice = Number(next.price);
+    if (![currentPrice, prevPrice, nextPrice].every((value) => Number.isFinite(value) && value > 0)) return false;
+    if (!(currentPrice < prevPrice && currentPrice < nextPrice)) return false;
+
+    const neighborMin = Math.min(prevPrice, nextPrice);
+    const neighborMax = Math.max(prevPrice, nextPrice);
+    if ((neighborMin / currentPrice) < WB_OUTLIER_CFG.minNeighborRatio) return false;
+    if ((neighborMax / neighborMin) > WB_OUTLIER_CFG.maxNeighborSpread) return false;
+
+    const firstTs = toInt(current.firstTs, 0);
+    const lastTs = toInt(current.lastTs, firstTs);
+    const prevDuration = Math.max(0, toInt(prev.lastTs, 0) - toInt(prev.firstTs, 0));
+    const nextDuration = Math.max(0, toInt(next.lastTs, 0) - toInt(next.firstTs, 0));
+    const currentDuration = Math.max(0, lastTs - firstTs);
+    const neighborDuration = Math.max(prevDuration, nextDuration);
+    if (currentDuration > WB_OUTLIER_CFG.maxDurationMs) return false;
+    if (neighborDuration > 0 && currentDuration > (neighborDuration * WB_OUTLIER_CFG.maxRelativeDuration)) return false;
+    return true;
+};
+
+const filterIntervalsForUsage = (rows, market) => {
+    const intervals = sortIntervalsForPid(rows);
+    if (resolveMarket(market, intervals[0]?.pidKey) !== 'wb' || intervals.length < 3) return intervals;
+    return intervals.filter((_, index) => !isWbOutlierInterval(intervals, index, market));
+};
+
+const clearProductMinFields = (state) => {
+    delete state.minPrice;
+    delete state.minCurrency;
+    delete state.minIntervalKey;
+    delete state.minFirstTs;
+    delete state.minLastTs;
+};
+
+const buildProductSummary = (pidKey, prevState, rows) => {
+    const intervals = sortIntervalsForPid(rows);
+    if (!intervals.length) return null;
+
+    const latest = intervals.slice().sort((a, b) => {
+        const byLast = toInt(a.lastTs, 0) - toInt(b.lastTs, 0);
+        if (byLast !== 0) return byLast;
+        return toInt(a.firstTs, 0) - toInt(b.firstTs, 0);
+    }).pop();
+    const market = resolveMarket(latest?.market || prevState?.market, pidKey);
+    const filtered = filterIntervalsForUsage(intervals, market);
+    const effective = filtered.length ? filtered : intervals;
+
+    let minInterval = effective[0];
+    effective.forEach((item) => {
+        if (Number(item.price) < Number(minInterval.price)) minInterval = item;
+        else if (eq(item.price, minInterval.price) && toInt(item.firstTs, 0) < toInt(minInterval.firstTs, 0)) minInterval = item;
+    });
+    const minPriceValue = Number(minInterval.price);
+    let minFirstTs = toInt(minInterval.firstTs, 0);
+    let minLastTs = toInt(minInterval.lastTs, 0);
+    effective.forEach((item) => {
+        if (!eq(item.price, minPriceValue)) return;
+        minFirstTs = Math.min(minFirstTs, toInt(item.firstTs, 0));
+        minLastTs = Math.max(minLastTs, toInt(item.lastTs, 0));
+    });
+
+    const state = prevState ? { ...prevState } : { pidKey, createdAt: now() };
+    state.pidKey = pidKey;
+    state.pid = String(latest?.pid || state.pid || '');
+    state.market = market;
+    state.createdAt = toInt(state.createdAt, now());
+    state.updatedAt = Math.max(
+        ...intervals.map((item) => toInt(item.updatedAt, 0)),
+        toInt(state.updatedAt, 0),
+        now(),
+    );
+    state.lastIntervalKey = String(latest?.key || state.lastIntervalKey || '');
+    state.lastPrice = Number(latest?.price);
+    state.lastCurrency = String(latest?.currency || '');
+    state.lastTs = toInt(latest?.lastTs, 0);
+    state.minPrice = minPriceValue;
+    state.minCurrency = String(minInterval.currency || '');
+    state.minIntervalKey = String(minInterval.key || '');
+    state.minFirstTs = minFirstTs;
+    state.minLastTs = minLastTs;
+    state.summaryVersion = PRODUCT_SUMMARY_VERSION;
+    state.summaryUpdatedAt = now();
+    if (!Number.isFinite(Number(state.minPrice))) clearProductMinFields(state);
+    return state;
+};
+
+const rebuildProductSummaries = async (pidKeys) => {
+    const keys = [...new Set((Array.isArray(pidKeys) ? pidKeys : []).map((pidKey) => String(pidKey || '').trim()).filter(Boolean))];
+    if (!keys.length) return { rebuilt: 0, deleted: 0 };
+
+    const db = await openPriceDb();
+    const tx = db.transaction([PRICE_DB.intervals, PRICE_DB.products], 'readwrite');
+    const intervalsStore = tx.objectStore(PRICE_DB.intervals);
+    const productsStore = tx.objectStore(PRICE_DB.products);
+    const idxByPid = intervalsStore.index('byPidFirst');
+    let rebuilt = 0;
+    let deleted = 0;
+
+    for (const pidKey of keys) {
+        const prevState = await idbReq(productsStore.get(pidKey));
+        const range = IDBKeyRange.bound([pidKey, 0], [pidKey, Number.MAX_SAFE_INTEGER]);
+        const rows = await idbReq(idxByPid.getAll(range));
+        const nextState = buildProductSummary(pidKey, prevState, rows);
+        if (!nextState) {
+            if (prevState) {
+                productsStore.delete(pidKey);
+                deleted += 1;
+            }
+            continue;
+        }
+        productsStore.put(nextState);
+        rebuilt += 1;
+    }
+
+    await txDone(tx);
+    return { rebuilt, deleted };
+};
+
+const ensureProductSummaries = async (pidKeys) => {
+    const keys = [...new Set((Array.isArray(pidKeys) ? pidKeys : []).map((pidKey) => String(pidKey || '').trim()).filter(Boolean))];
+    if (!keys.length) return { rebuilt: 0, deleted: 0 };
+
+    const db = await openPriceDb();
+    const tx = db.transaction(PRICE_DB.products, 'readonly');
+    const store = tx.objectStore(PRICE_DB.products);
+    const stale = [];
+    for (const pidKey of keys) {
+        const state = await idbReq(store.get(pidKey));
+        if (toInt(state?.summaryVersion, 0) >= PRODUCT_SUMMARY_VERSION) continue;
+        stale.push(pidKey);
+    }
+    await txDone(tx);
+    if (!stale.length) return { rebuilt: 0, deleted: 0 };
+    return rebuildProductSummaries(stale);
 };
 
 const collectMarketStats = (store, kind) => new Promise((resolve, reject) => {
@@ -1222,7 +1343,8 @@ const getMergedHistoryByPid = async (pidKey, limit = 5000) => {
             if (fetched.ok) SYNC_STATE.historyFetchedAt.set(cleanPidKey, now());
         }
     }
-    return getIntervalsByPid(cleanPidKey, limit);
+    const intervals = await getIntervalsByPid(cleanPidKey, limit);
+    return filterIntervalsForUsage(intervals, cleanPidKey);
 };
 
 const getMergedMinBatch = async (pidKeys) => {

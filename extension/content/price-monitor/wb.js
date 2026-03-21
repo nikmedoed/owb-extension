@@ -17,6 +17,17 @@
         findPriceInCard,
     } = PM;
     function initWB() {
+        const parseBasketPriceText = (text) => {
+            const raw = String(text || '').replace(/[\u00A0\u202F]/g, ' ').replace(/\s+/g, ' ').trim();
+            if (!raw) return null;
+            const lowered = raw.toLowerCase();
+            if (/(?:\/|за)\s*\d*[.,]?\d*\s*(шт|шту|уп|упак|пак|г|гр|кг|мл|л)\b/.test(lowered)) return null;
+            if (/(шт|шту|уп|упак|пак|г|гр|кг|мл|л)\b/.test(lowered) && /(?:\/|за|x|×)/.test(lowered)) return null;
+            const numberGroups = raw.match(/\d[\d\s.,]*/g) || [];
+            if (numberGroups.length > 1) return null;
+            const price = parsePriceValue(raw);
+            return Number.isFinite(price) ? { price, currency: detectCurrency(raw) || '₽', text: raw } : null;
+        };
         const getPid = () => {
             const fromUrl = location.pathname.match(/\/catalog\/(\d{4,})\/detail/i);
             if (fromUrl) return fromUrl[1];
@@ -74,18 +85,18 @@
         };
         const getCardPrice = (card) => {
             if (!card) return null;
-            const walletNode = card.querySelector('.list-item__price-wallet, [class*="list-item__price-wallet"], [class*="price-wallet"]');
-            if (walletNode) {
-                const text = walletNode.textContent || '';
-                const price = parsePriceValue(text);
-                if (Number.isFinite(price)) return { price, currency: detectCurrency(text) || '₽', text };
-            }
             const primaryNode = card.querySelector('.list-item__price > div, [class*="list-item__price"] [class*="red-price"]');
-            if (primaryNode) {
-                const text = primaryNode.textContent || '';
-                const price = parsePriceValue(text);
-                if (Number.isFinite(price)) return { price, currency: detectCurrency(text) || '₽', text };
+            const walletNode = card.querySelector('.list-item__price-wallet, [class*="list-item__price-wallet"], [class*="price-wallet"]');
+            const primaryInfo = parseBasketPriceText(primaryNode?.textContent || '');
+            const walletInfo = parseBasketPriceText(walletNode?.textContent || '');
+            if (primaryInfo && walletInfo) {
+                const low = Math.min(primaryInfo.price, walletInfo.price);
+                const high = Math.max(primaryInfo.price, walletInfo.price);
+                if (low > 0 && (high / low) >= 2.5) return primaryInfo.price >= walletInfo.price ? primaryInfo : walletInfo;
+                return primaryInfo.price <= walletInfo.price ? primaryInfo : walletInfo;
             }
+            if (primaryInfo) return primaryInfo;
+            if (walletInfo) return walletInfo;
             const info = findPriceInCard(card, { defaultCurrency: '₽' });
             return info && Number.isFinite(Number(info.price)) ? { price: Number(info.price), currency: info.currency || '₽', text: card.textContent || '' } : null;
         };
