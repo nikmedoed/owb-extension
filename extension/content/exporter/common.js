@@ -11,6 +11,7 @@
     const { addStyleOnce } = MP;
     const state = {
         runExport: null,
+        restoreFocus: null,
     };
 
     const hasRuntime = () => !!(globalThis.chrome && chrome.runtime && chrome.runtime.onMessage);
@@ -142,12 +143,18 @@
         chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             if (!message || message.scope !== 'owb-export') return undefined;
             const action = String(message.action || '');
-            if (action !== 'export-card' && action !== 'copy-text') return undefined;
+            if (action !== 'export-card' && action !== 'copy-text' && action !== 'restore-card-focus') return undefined;
             (async () => {
                 if (action === 'copy-text') {
                     const text = String(message.payload && message.payload.text ? message.payload.text : '');
                     await copyToClipboard(text);
                     return { copied: true };
+                }
+                if (action === 'restore-card-focus') {
+                    if (typeof state.restoreFocus === 'function') {
+                        await state.restoreFocus(message.options || {});
+                    }
+                    return { restored: true };
                 }
                 if (typeof state.runExport !== 'function') throw new Error('Экспорт на текущей вкладке недоступен');
                 return state.runExport(message.options || {});
@@ -168,6 +175,9 @@
         saveLastExtractSessionFromItem,
         setRunExport: (handler) => {
             state.runExport = typeof handler === 'function' ? handler : null;
+        },
+        setRestoreFocus: (handler) => {
+            state.restoreFocus = typeof handler === 'function' ? handler : null;
         },
     };
 })();

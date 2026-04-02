@@ -351,9 +351,12 @@ const runWindowBatchExport = async (options = {}) => {
     const windowId = activeTab && Number.isFinite(Number(activeTab.windowId)) ? Number(activeTab.windowId) : null;
 
     withBusy(true);
-    setStatus('Обрабатываю вкладки окна...');
-    setBatchMeta('Переключаю вкладки и собираю карточки...');
+    setStatus('Закрываю повторы перед запуском...');
+    setBatchMeta('Подготавливаю окно: удаляю дубликаты вкладок');
     try {
+        await callMonitor('tabs:close-duplicates', { windowId });
+        setStatus('Обрабатываю вкладки окна...');
+        setBatchMeta('Переключаю вкладки и собираю карточки...');
         const result = await callMonitor('batch:run-window-export', {
             mode,
             allReviews,

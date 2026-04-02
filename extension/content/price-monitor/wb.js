@@ -85,6 +85,9 @@
         };
         const getCardPrice = (card) => {
             if (!card) return null;
+            const favoritesNowNode = card.querySelector('ins[class*="goodsCardPriceNow"], ins[class*="walletPrice"], p[class*="goodsCardPrice"] ins');
+            const favoritesInfo = parseBasketPriceText(favoritesNowNode?.textContent || '');
+            if (favoritesInfo) return favoritesInfo;
             const primaryNode = card.querySelector('.list-item__price > div, [class*="list-item__price"] [class*="red-price"]');
             const walletNode = card.querySelector('.list-item__price-wallet, [class*="list-item__price-wallet"], [class*="price-wallet"]');
             const primaryInfo = parseBasketPriceText(primaryNode?.textContent || '');
@@ -112,12 +115,18 @@
                     '.basket-list .j-b-basket-item',
                     '.basket-list .accordion__list-item.list-item',
                     '.accordion__list .j-b-basket-item',
+                    'li[class*="goodsCardFavorites"]',
+                    'li[id^="fav"][class*="goodsCard"]',
                 ].join(', '),
                 getPid: getCardPid,
                 getPrice: getCardPrice,
                 defaultCurrency: '₽',
             }),
-            getBadgeTarget: (card) => card.querySelector('.list-item__good') || card.querySelector('.list-item__good-info') || card,
+            getBadgeTarget: (card) => card.querySelector('.list-item__good')
+                || card.querySelector('.list-item__good-info')
+                || card.querySelector('[class*="imgWrap"]')
+                || card.querySelector('a[href*="/catalog/"][href*="/detail"]')
+                || card,
         });
     }
     const detectCurrentProduct = () => {

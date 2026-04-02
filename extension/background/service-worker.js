@@ -1689,6 +1689,10 @@ const runWindowExportBatch = async (opts = {}) => {
                 });
             }
             successes.push(item);
+            await sendMessageToTab(tab.id, {
+                scope: 'owb-export',
+                action: 'restore-card-focus',
+            }).catch(() => null);
         } catch (err) {
             failures.push({
                 tabId: tab.id,

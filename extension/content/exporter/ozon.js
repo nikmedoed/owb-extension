@@ -18,6 +18,7 @@
         copyToClipboard,
         saveLastExtractSessionFromItem,
         setRunExport,
+        setRestoreFocus,
     } = Exporter;
 
     function initOzon() {
@@ -117,6 +118,11 @@
             el.scrollIntoView({ behavior: 'smooth', block, inline: 'nearest' });
             await sleep(Number(options.settleMs) || 220);
         };
+        const restoreCardFocus = async () => {
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+            await sleep(240);
+        };
+        setRestoreFocus(restoreCardFocus);
         const findWithPageScroll = async (finder, options = {}) => {
             const maxSteps = Number(options.maxSteps) || 24;
             const stepRatio = Number(options.stepRatio) || 0.32;
@@ -869,6 +875,7 @@
                         mode: 'copy',
                         allReviews: opts.includeReviews !== false,
                     });
+                    await restoreCardFocus();
                     return;
                 }
                 downloadTextFile(pack.filename, pack.text);
@@ -876,6 +883,7 @@
                     mode: 'download',
                     allReviews: opts.includeReviews !== false,
                 });
+                await restoreCardFocus();
             } catch (err) {
                 console.error('Ozon exporter:', err);
             }

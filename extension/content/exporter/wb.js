@@ -26,19 +26,94 @@
             || document.querySelector('ins[class^="priceBlockFinalPrice"], ins[class*=" priceBlockFinalPrice"]')
             || document.querySelector('span[class^="priceBlockPrice"], span[class*=" priceBlockPrice"], [class*="priceBlock"] [class*="price"], [class*="orderBlock"] [class*="price"]');
         async function loadWBReviews(max = 100) {
-            const DELAY = 600, MAX_IDLE = 6;
-            let idle = 0, prev = 0;
+            const DELAY = 550;
+            const MAX_IDLE = 10;
+            const target = Math.max(1, Number(max) || 100);
+            let idle = 0;
+            let prev = 0;
             while (true) {
                 const items = document.querySelectorAll('li.comments__item');
-                if (items.length >= max) break;
-                if (items.length) items[items.length - 1].scrollIntoView({ block: 'end', behavior: 'smooth' });
-                else window.scrollBy(0, 300);
+                if (items.length >= target) break;
+                if (items.length) {
+                    items[items.length - 1].scrollIntoView({ block: 'end', behavior: 'auto' });
+                } else {
+                    window.scrollBy(0, 340);
+                }
+                window.scrollBy(0, Math.max(260, Math.round(window.innerHeight * 0.34)));
                 await sleep(DELAY);
                 const now = document.querySelectorAll('li.comments__item').length;
-                if (now === prev) { if (++idle >= MAX_IDLE) break; } else { prev = now; idle = 0; }
+                if (now === prev) {
+                    idle += 1;
+                    const loadNode = document.querySelector('.product-feedbacks__load');
+                    if (loadNode) {
+                        try { loadNode.scrollIntoView({ block: 'center', behavior: 'auto' }); } catch (_) {}
+                    }
+                    if (idle >= MAX_IDLE) break;
+                } else {
+                    prev = now;
+                    idle = 0;
+                }
             }
-            return [...document.querySelectorAll('li.comments__item')].slice(0, max);
+            return [...document.querySelectorAll('li.comments__item')].slice(0, target);
         }
+        const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        const getReviewVariantTiles = (root) => {
+            if (!root) return [];
+            const scope = root.querySelector('.feedbacksColors--NtFag, [class*="feedbacksColors"], [class*="swiperColors"]') || root;
+            return [...scope.querySelectorAll('.swiper-wrapper > .swiper-slide:not(.swiper-slide-duplicate)')]
+                .map((slide) => slide.querySelector(':scope > div[class*="feedbacksColorsItem"]') || slide.querySelector('div[class*="feedbacksColorsItem"]'))
+                .filter((tile) => !!tile && !!tile.querySelector('.option--AtxKZ, [class*="option"]'));
+        };
+        const isAllVariantTile = (tile) => {
+            const cls = [...(tile?.classList || [])].some((c) => /^isAll--/.test(c));
+            const txt = normalizeText(tile?.querySelector('.option--AtxKZ, [class*="option"]')?.textContent || tile?.textContent || '');
+            return cls || txt === 'все' || txt === 'all';
+        };
+        const getTileLabel = (tile) => normalizeText(tile?.querySelector('.option--AtxKZ, [class*="option"]')?.textContent || '');
+        const getReviewColors = (limit = 14) => [...document.querySelectorAll('li.comments__item')]
+            .slice(0, limit)
+            .map((el) => normalizeText(el.querySelector('.feedback__params-item--color span, [class*="feedbackParamsColor"] span')?.textContent || ''))
+            .filter(Boolean);
+        const isReviewsFilteredByLabel = (label) => {
+            const colors = getReviewColors(16);
+            if (colors.length < 4) return false;
+            const uniq = [...new Set(colors)];
+            return uniq.length === 1 && (!label || uniq[0] === label);
+        };
+        const clickVariantTile = async (tile) => {
+            if (!tile) return;
+            const targets = [
+                tile.querySelector('.option--AtxKZ, [class*="option"]'),
+                tile.querySelector('img[src], img[data-src], img[data-src-pb]'),
+                tile.querySelector('button, [role="button"]'),
+                tile,
+                tile.closest('.swiper-slide'),
+            ].filter(Boolean);
+            for (const node of targets) {
+                try { node.click(); } catch (_) {}
+                await sleep(45);
+            }
+        };
+        const switchWBReviewsToFirstSpecificVariant = async () => {
+            const root = document.querySelector('.product-feedbacks__main-wrapper, [class*="product-feedbacks__main"]');
+            if (!root) return true;
+            const tiles = getReviewVariantTiles(root);
+            if (tiles.length < 2 || !isAllVariantTile(tiles[0])) return true;
+            const target = tiles[1];
+            const label = getTileLabel(target);
+            if (!label) return false;
+            for (let i = 0; i < 4; i += 1) {
+                if (isReviewsFilteredByLabel(label)) return true;
+                try { target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'auto' }); } catch (_) {}
+                await clickVariantTile(target);
+                const start = Date.now();
+                while (Date.now() - start < 950) {
+                    if (isReviewsFilteredByLabel(label)) return true;
+                    await sleep(140);
+                }
+            }
+            return false;
+        };
 
         const getWBPidKey = () => {
             const path = String(location.pathname || '');
@@ -171,11 +246,14 @@
                 await wait('.product-feedbacks__main, [class*="product-feedbacks__main"]', 10000);
                 await sleep(300);
                 if (switchToVariant) {
-                    const variant = [...document.querySelectorAll('.product-feedbacks__tabs .product-feedbacks__title, [class*="product-feedbacks__title"]')]
-                        .find(el => /этот вариант товара/i.test(el.innerText));
-                    if (variant) { variant.click(); await sleep(300); }
+                    const switched = await switchWBReviewsToFirstSpecificVariant();
+                    if (!switched) {
+                        throw new Error('Не удалось переключить отзывы WB на конкретный вариант (вторая плитка после "Все").');
+                    }
+                    await sleep(180);
                 }
-                const revs = await loadWBReviews(100);
+                const expectedReviews = Math.max(1, Math.min(100, Number(reviewsTotal) || 100));
+                const revs = await loadWBReviews(expectedReviews);
                 const pickBables = (node) => {
                     const res = [];
                     node.querySelectorAll('.feedbacks-bables').forEach((b) => {
