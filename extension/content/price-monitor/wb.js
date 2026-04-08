@@ -16,6 +16,18 @@
         findBlockAnchor,
         findPriceInCard,
     } = PM;
+    const getPriceNode = () => document.querySelector('[class^="priceBlockWalletPrice"], [class*=" priceBlockWalletPrice"]')
+        || document.querySelector('ins[class^="priceBlockFinalPrice"], ins[class*=" priceBlockFinalPrice"]')
+        || document.querySelector('span[class^="priceBlockPrice"], span[class*=" priceBlockPrice"], [class*="priceBlock"] [class*="price"], [class*="orderBlock"] [class*="price"]');
+    const getPagePrice = () => {
+        const node = getPriceNode();
+        if (!node) return null;
+        const text = node.textContent || '';
+        const info = findPriceInCard(node.closest('section,article,div') || node.parentElement || node, { defaultCurrency: '₽' });
+        if (info && Number.isFinite(Number(info.price))) return { price: Number(info.price), currency: info.currency || '₽', text };
+        const parsed = parsePriceValue(text);
+        return Number.isFinite(parsed) ? { price: parsed, currency: detectCurrency(text) || '₽', text } : null;
+    };
     function initWB() {
         const parseBasketPriceText = (text) => {
             const raw = String(text || '').replace(/[\u00A0\u202F]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -38,18 +50,6 @@
             if (digits) return digits;
             return findArticleByLabel(document.body);
         };
-        const getPriceNode = () => document.querySelector('[class^="priceBlockWalletPrice"], [class*=" priceBlockWalletPrice"]')
-            || document.querySelector('ins[class^="priceBlockFinalPrice"], ins[class*=" priceBlockFinalPrice"]')
-            || document.querySelector('span[class^="priceBlockPrice"], span[class*=" priceBlockPrice"], [class*="priceBlock"] [class*="price"], [class*="orderBlock"] [class*="price"]');
-        const getPrice = () => {
-            const node = getPriceNode();
-            if (!node) return null;
-            const text = node.textContent || '';
-            const info = findPriceInCard(node.closest('section,article,div') || node.parentElement || node, { defaultCurrency: '₽' });
-            if (info && Number.isFinite(Number(info.price))) return { price: Number(info.price), currency: info.currency || '₽', text };
-            const parsed = parsePriceValue(text);
-            return Number.isFinite(parsed) ? { price: parsed, currency: detectCurrency(text) || '₽', text } : null;
-        };
         const getAnchor = () => {
             const node = getPriceNode();
             if (!node) return null;
@@ -70,7 +70,7 @@
             return candidate || findBlockAnchor(node, /priceBlock|productPrice|productSummary|priceBlockContent|orderBlock|buybox|basket/i) || node.parentElement || node;
         };
         const isProductPage = () => /\/catalog\/\d{4,}\/detail/i.test(location.pathname || '');
-        startProductTracker({ market: 'wb', getPid, getPrice, getAnchor, isProductPage });
+        startProductTracker({ market: 'wb', getPid, getPrice: getPagePrice, getAnchor, isProductPage });
 
         const getCardPid = (card) => {
             if (!card) return '';
@@ -103,6 +103,33 @@
             const info = findPriceInCard(card, { defaultCurrency: '₽' });
             return info && Number.isFinite(Number(info.price)) ? { price: Number(info.price), currency: info.currency || '₽', text: card.textContent || '' } : null;
         };
+        const isWbCartCard = (card) => !!(
+            card
+            && (
+                card.matches('.j-b-basket-item, .accordion__list-item.list-item')
+                || card.closest('.basket-list, .accordion__list')
+            )
+            && card.querySelector('img, picture')
+        );
+        const getCartBadgeTarget = (card) => {
+            const image = card.querySelector('picture img, img');
+            let imageBlock = image?.closest('.list-item__photo')
+                || image?.closest('[class*="photo"]')
+                || image?.closest('[class*="img"]')
+                || image?.parentElement
+                || card;
+            while (imageBlock && imageBlock !== card) {
+                const text = String(imageBlock.textContent || '').replace(/\s+/g, ' ').trim();
+                if (imageBlock.querySelector('img, picture') && text.length <= 40) break;
+                imageBlock = imageBlock.parentElement;
+            }
+            imageBlock = imageBlock && imageBlock !== card ? imageBlock : (image?.parentElement || card);
+            imageBlock.classList.remove('mp-min-price-anchor--below-center');
+            imageBlock.classList.remove('mp-min-price-anchor--below');
+            imageBlock.classList.remove('mp-min-price-anchor--photo');
+            imageBlock.classList.add('mp-min-price-anchor--photo-inside');
+            return imageBlock;
+        };
         startCardScanner({
             collectGroups: () => collectGroupsFromCards({
                 market: 'wb',
@@ -122,11 +149,13 @@
                 getPrice: getCardPrice,
                 defaultCurrency: '₽',
             }),
-            getBadgeTarget: (card) => card.querySelector('.list-item__good')
+            getBadgeTarget: (card) => (isWbCartCard(card) ? getCartBadgeTarget(card) : (
+                card.querySelector('.list-item__good')
                 || card.querySelector('.list-item__good-info')
                 || card.querySelector('[class*="imgWrap"]')
                 || card.querySelector('a[href*="/catalog/"][href*="/detail"]')
-                || card,
+                || card
+            )),
         });
     }
     const detectCurrentProduct = () => {
@@ -137,7 +166,7 @@
             || extractDigits(document.querySelector('meta[itemprop="sku"], meta[name="item_id"]')?.getAttribute('content') || '')
             || '';
         if (!pid) return null;
-        const priceInfo = getPrice();
+        const priceInfo = getPagePrice();
         return {
             market: 'wb',
             pid,

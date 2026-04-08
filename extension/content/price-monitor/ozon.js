@@ -16,8 +16,31 @@
         findArticleByLabel,
         findPriceInCard,
     } = PM;
+    const pickVisible = (nodes) => (nodes || []).find((el) => el && el.isConnected && el.getClientRects && el.getClientRects().length) || (nodes && nodes[0]) || null;
+    const getPriceWidget = () => pickVisible([...document.querySelectorAll('[data-widget="webPrice"]')]);
+    const getSaleWidget = () => pickVisible([...document.querySelectorAll('[data-widget="webSale"]')]);
+    const getPagePrice = () => {
+        const priceWidget = getPriceWidget();
+        if (priceWidget) {
+            const headline = priceWidget.querySelector('span[class*="tsHeadline"], .tsHeadline600Large, .tsHeadline500Medium');
+            const headlineText = headline?.textContent || '';
+            if (headlineText) {
+                const headlinePrice = parsePriceValue(headlineText);
+                if (Number.isFinite(headlinePrice)) return { price: headlinePrice, currency: detectCurrency(headlineText) || '₽', text: headlineText };
+            }
+            const text = priceWidget.querySelector('span')?.textContent || priceWidget.textContent || '';
+            const info = findPriceInCard(priceWidget, { defaultCurrency: '₽' });
+            if (info && Number.isFinite(Number(info.price))) return { price: Number(info.price), currency: info.currency || '₽', text };
+            const parsed = parsePriceValue(text);
+            if (Number.isFinite(parsed)) return { price: parsed, currency: detectCurrency(text) || '₽', text };
+        }
+        const saleWidget = getSaleWidget();
+        if (!saleWidget) return null;
+        const info = findPriceInCard(saleWidget, { defaultCurrency: '₽' });
+        if (info && Number.isFinite(Number(info.price))) return { price: Number(info.price), currency: info.currency || '₽', text: saleWidget.textContent || '' };
+        return null;
+    };
     function initOzon() {
-        const pickVisible = (nodes) => (nodes || []).find((el) => el && el.isConnected && el.getClientRects && el.getClientRects().length) || (nodes && nodes[0]) || null;
         const getPid = () => {
             const path = location.pathname;
             const fromUrl = path.match(/\/product\/[^/]*?(\d{5,})(?:\/|$)/) || path.match(/\/product\/(\d{5,})(?:\/|$)/);
@@ -26,32 +49,9 @@
             if (sku) return sku;
             return findArticleByLabel(document.querySelector('#section-characteristics')) || findArticleByLabel(document.body);
         };
-        const getPriceWidget = () => pickVisible([...document.querySelectorAll('[data-widget="webPrice"]')]);
-        const getSaleWidget = () => pickVisible([...document.querySelectorAll('[data-widget="webSale"]')]);
-        const getPrice = () => {
-            const priceWidget = getPriceWidget();
-            if (priceWidget) {
-                const headline = priceWidget.querySelector('span[class*="tsHeadline"], .tsHeadline600Large, .tsHeadline500Medium');
-                const headlineText = headline?.textContent || '';
-                if (headlineText) {
-                    const headlinePrice = parsePriceValue(headlineText);
-                    if (Number.isFinite(headlinePrice)) return { price: headlinePrice, currency: detectCurrency(headlineText) || '₽', text: headlineText };
-                }
-                const text = priceWidget.querySelector('span')?.textContent || priceWidget.textContent || '';
-                const info = findPriceInCard(priceWidget, { defaultCurrency: '₽' });
-                if (info && Number.isFinite(Number(info.price))) return { price: Number(info.price), currency: info.currency || '₽', text };
-                const parsed = parsePriceValue(text);
-                if (Number.isFinite(parsed)) return { price: parsed, currency: detectCurrency(text) || '₽', text };
-            }
-            const saleWidget = getSaleWidget();
-            if (!saleWidget) return null;
-            const info = findPriceInCard(saleWidget, { defaultCurrency: '₽' });
-            if (info && Number.isFinite(Number(info.price))) return { price: Number(info.price), currency: info.currency || '₽', text: saleWidget.textContent || '' };
-            return null;
-        };
         const getAnchor = () => getPriceWidget() || getSaleWidget();
         const isProductPage = () => /\/product\/[^/]*?\d{5,}(?:\/|$)/.test(location.pathname || '');
-        startProductTracker({ market: 'ozon', getPid, getPrice, getAnchor, isProductPage });
+        startProductTracker({ market: 'ozon', getPid, getPrice: getPagePrice, getAnchor, isProductPage });
 
         const extractIdFromOzonMedia = (value) => {
             const text = String(value || '');
@@ -66,12 +66,22 @@
             }
             return '';
         };
-        const isOzonCartCard = (card) => !!(
-            card
-            && card.querySelector('img')
-            && card.querySelector('.checkout_s1, [class*="checkout_s1"]')
-            && card.querySelector('.checkout_r5, [class*="checkout_r5"]')
-        );
+        const isDirectCartChild = (card) => {
+            const root = card?.closest?.('[data-widget="cartSplit"]');
+            return !!(root && card.parentElement === root);
+        };
+        const isOzonCartCard = (card) => {
+            if (!card || !isDirectCartChild(card)) return false;
+            if (!card.querySelector('img')) return false;
+            const hasTitle = !!card.querySelector(
+                'a[href*="/product/"], [class*="checkout_p2"], [class*="tsCompact500"], [class*="tsCompact400"]',
+            );
+            if (!hasTitle) return false;
+            const text = String(card.textContent || '').replace(/\s+/g, ' ').trim();
+            const hasCartSignals = /купить|похожие|закончился|количество ограничено|осталось\s+\d+/i.test(text);
+            const priceInfo = findPriceInCard(card, { defaultCurrency: '₽' });
+            return !!(hasCartSignals || (priceInfo && Number.isFinite(Number(priceInfo.price))));
+        };
         const getCardPid = (card) => {
             if (!card) return '';
             const fav = card.querySelector('[favlistslink*="sku="]')?.getAttribute('favlistslink') || card.getAttribute('favlistslink') || '';
@@ -93,22 +103,16 @@
         const getCardPrice = (card) => {
             if (!card) return null;
             if (isOzonCartCard(card)) {
-                const mainPriceNode = card.querySelector(
-                    '.checkout_s1 .tsHeadline400Small, .checkout_s1 [class*="tsHeadline"], [class*="checkout_s1"] [class*="tsHeadline"], .checkout_o4 [class*="tsHeadline"]',
-                );
-                if (mainPriceNode) {
-                    const text = mainPriceNode.textContent || '';
-                    const price = parsePriceValue(text);
-                    if (Number.isFinite(price)) return { price, currency: detectCurrency(text) || '₽', text };
-                }
-                const checkoutPriceBlock = card.querySelector('.checkout_s1, [class*="checkout_s1"], .checkout_o4, [class*="checkout_o4"]');
-                const checkoutInfo = findPriceInCard(checkoutPriceBlock || card, { defaultCurrency: '₽' });
-                if (checkoutInfo && Number.isFinite(Number(checkoutInfo.price))) {
-                    return {
-                        price: Number(checkoutInfo.price),
-                        currency: checkoutInfo.currency || '₽',
-                        text: checkoutPriceBlock?.textContent || card.textContent || '',
-                    };
+                for (const block of [...card.children]) {
+                    if (!block || !block.querySelector) continue;
+                    const info = findPriceInCard(block, { defaultCurrency: '₽' });
+                    if (info && Number.isFinite(Number(info.price))) {
+                        return {
+                            price: Number(info.price),
+                            currency: info.currency || '₽',
+                            text: block.textContent || card.textContent || '',
+                        };
+                    }
                 }
             }
             // Ozon often renders tile prices via headline typography (including skuGrid cards).
@@ -129,6 +133,19 @@
             const info = findPriceInCard(card, { defaultCurrency: '₽' });
             return info && Number.isFinite(Number(info.price)) ? { price: Number(info.price), currency: info.currency || '₽', text: card.textContent || '' } : null;
         };
+        const getCartBadgeTarget = (card) => {
+            const image = card?.querySelector('picture img, img');
+            let imageBlock = image?.parentElement;
+            if (imageBlock?.tagName === 'PICTURE') imageBlock = imageBlock.parentElement;
+            if (!imageBlock || !card.contains(imageBlock)) {
+                imageBlock = image?.closest('div') || image || card;
+            }
+            imageBlock.classList.remove('mp-min-price-anchor--below-center');
+            imageBlock.classList.remove('mp-min-price-anchor--below');
+            imageBlock.classList.remove('mp-min-price-anchor--photo');
+            imageBlock.classList.add('mp-min-price-anchor--photo-inside');
+            return imageBlock;
+        };
         startCardScanner({
             collectGroups: () => collectGroupsFromCards({
                 market: 'ozon',
@@ -137,15 +154,19 @@
                     '[data-widget="skuGrid"] [data-index]',
                     'article[class*="tile"]',
                     'div[data-sku][class*="tile"]',
-                    '[data-widget="cartSplit"] .checkout_r9',
-                    '[data-widget="cartSplit"] [class*="checkout_r9"]',
+                    '[data-widget="cartSplit"] > div',
+                    '[data-widget="cartSplit"] > section',
+                    '[data-widget="cartSplit"] > article',
                 ].join(', '),
                 getPid: getCardPid,
                 getPrice: getCardPrice,
                 isCardCandidate: (card) => isOzonCartCard(card) || isBadgeCardCandidate(card, 'ozon'),
                 defaultCurrency: '₽',
             }),
-            getBadgeTarget: (card) => card.querySelector('.checkout_s0, [class*="checkout_s0"]') || card.querySelector('.checkout_r5, [class*="checkout_r5"]') || card,
+            getBadgeTarget: (card) => {
+                if (isOzonCartCard(card)) return getCartBadgeTarget(card);
+                return card.querySelector('.checkout_s0, [class*="checkout_s0"]') || card.querySelector('.checkout_r5, [class*="checkout_r5"]') || card;
+            },
         });
     }
     const detectCurrentProduct = () => {
@@ -156,7 +177,7 @@
             || findArticleByLabel(document.querySelector('#section-characteristics'))
             || '';
         if (!pid) return null;
-        const priceInfo = getPrice();
+        const priceInfo = getPagePrice();
         return {
             market: 'ozon',
             pid,

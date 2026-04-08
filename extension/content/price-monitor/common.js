@@ -85,6 +85,14 @@ const CFG = {
         .mp-price-chart--floating{position:fixed;right:24px;bottom:90px;width:280px;z-index:2147483646}
         .mp-min-price-anchor{position:relative}
         .mp-min-price-badge{position:absolute;top:6px;left:6px;background:rgba(17,17,17,0.84);color:#fff;font-size:11px;line-height:1.2;padding:4px 6px;border-radius:6px;font-weight:600;letter-spacing:0.2px;box-shadow:0 6px 12px rgba(0,0,0,0.22);z-index:6;pointer-events:none}
+        .mp-min-price-anchor--below{position:static}
+        .mp-min-price-anchor--below .mp-min-price-badge{position:static;display:inline-flex;align-items:center;max-width:100%;margin-top:8px}
+        .mp-min-price-anchor--below-center{position:static}
+        .mp-min-price-anchor--below-center .mp-min-price-badge{position:static;display:flex;align-items:center;justify-content:center;width:max-content;max-width:100%;margin:8px auto 0}
+        .mp-min-price-anchor--photo{position:relative}
+        .mp-min-price-anchor--photo .mp-min-price-badge{position:absolute;top:calc(100% - 12px);left:50%;transform:translateX(-50%);width:max-content;max-width:100%;margin:0}
+        .mp-min-price-anchor--photo-inside{position:relative}
+        .mp-min-price-anchor--photo-inside .mp-min-price-badge{position:absolute;left:50%;bottom:6px;top:auto;transform:translateX(-50%);width:max-content;max-width:calc(100% - 8px);margin:0}
         .mp-min-price-badge--empty{display:none}
     `, 'mp-price-monitor');
 
