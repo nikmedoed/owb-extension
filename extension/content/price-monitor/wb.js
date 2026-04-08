@@ -137,7 +137,13 @@
             || extractDigits(document.querySelector('meta[itemprop="sku"], meta[name="item_id"]')?.getAttribute('content') || '')
             || '';
         if (!pid) return null;
-        return { market: 'wb', pid, pidKey: `wb:${pid}` };
+        const priceInfo = getPrice();
+        return {
+            market: 'wb',
+            pid,
+            pidKey: `wb:${pid}`,
+            currency: priceInfo?.currency || '',
+        };
     };
 
     setCurrentProductDetector(detectCurrentProduct);

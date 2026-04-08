@@ -180,6 +180,7 @@ const requestCurrentProductFromTab = async (tabId) => {
             market: String(res.data.market || '').trim(),
             pid: String(res.data.pid || '').trim(),
             pidKey,
+            currency: String(res.data.currency || '').trim(),
         };
     } catch (_) {
         return null;
@@ -198,7 +199,7 @@ const intervalsToSeries = (intervals) => {
     });
     const map = new Map();
     out.forEach((p) => {
-        map.set(`${p.ts}:${Math.round(p.price * 10000)}`, p);
+        map.set(`${p.ts}:${Math.round(p.price * 10000)}:${String(p.currency || '')}`, p);
     });
     return [...map.values()].sort((a, b) => a.ts - b.ts);
 };
@@ -290,7 +291,10 @@ const loadQuickChart = async () => {
         return;
     }
     const fromUrl = parseProductFromUrl(tab.url);
-    const current = fromUrl || await requestCurrentProductFromTab(tab.id);
+    const fromTab = await requestCurrentProductFromTab(tab.id);
+    const current = fromTab && fromTab.pidKey
+        ? { ...(fromUrl || {}), ...fromTab }
+        : fromUrl;
     if (!current || !current.pidKey) {
         currentProduct = null;
         updateResetButtonState();
@@ -309,6 +313,7 @@ const loadQuickChart = async () => {
         type: 'owb:price-history',
         pidKey: current.pidKey,
         limit: 5000,
+        preferredCurrency: String(current.currency || ''),
     });
     if (!response || !response.ok) {
         clearQuickChart(`График: ${current.pidKey}`, '', response && response.error ? response.error : 'Ошибка чтения истории');

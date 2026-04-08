@@ -62,11 +62,11 @@ const CFG = {
         return response.data;
     };
     const bgCaptureBatch = async (records) => callBg('owb:price-capture-batch', { records }, 20000);
-    const bgGetHistory = async (pidKey) => {
-        const data = await callBg('owb:price-history', { pidKey, limit: 5000 }, 15000);
+    const bgGetHistory = async (pidKey, preferredCurrency = '') => {
+        const data = await callBg('owb:price-history', { pidKey, limit: 5000, preferredCurrency }, 15000);
         return Array.isArray(data?.intervals) ? data.intervals : [];
     };
-    const bgGetMinBatch = async (pidKeys) => callBg('owb:price-min-batch', { pidKeys }, 15000);
+    const bgGetMinBatch = async (pidKeys, preferredCurrencies = {}) => callBg('owb:price-min-batch', { pidKeys, preferredCurrencies }, 15000);
     const bgExport = async () => callBg('owb:price-export', {}, 20000);
     const bgImport = async (payload) => callBg('owb:price-import', { payload }, 20000);
     const bgGetStatus = async () => callBg('owb:price-get-status', {}, 10000);
@@ -133,7 +133,7 @@ const CFG = {
         }
         const dedupe = new Map();
         out.forEach((p) => {
-            const key = `${p.ts}:${Math.round(p.price * 10000)}`;
+            const key = `${p.ts}:${Math.round(p.price * 10000)}:${String(p.currency || '')}`;
             dedupe.set(key, p);
         });
         return [...dedupe.values()].sort((a, b) => a.ts - b.ts);
@@ -358,7 +358,7 @@ const CFG = {
 
                 const t = now();
                 if (state.pidKey && (captured || !state.lastRenderTs || (t - state.lastRenderTs) >= CFG.renderHeartbeatMs)) {
-                    const intervals = await bgGetHistory(state.pidKey);
+                    const intervals = await bgGetHistory(state.pidKey, record?.currency || state.lastCurrency || '');
                     const history = intervalsToSeries(intervals);
                     renderChart(state.chart, history, { currency: record?.currency || state.lastCurrency || '₽' });
                     state.lastRenderTs = t;
@@ -437,11 +437,13 @@ const CFG = {
 
                 const captures = [];
                 const pidKeys = [];
+                const preferredCurrencies = {};
                 const t = now();
                 groups.forEach((group) => {
                     pidKeys.push(group.pidKey);
                     const rec = toCaptureRecord(group.pidKey, group.pid, group.priceInfo, t);
                     if (!rec) return;
+                    preferredCurrencies[group.pidKey] = rec.currency;
                     const prev = captureState.get(group.pidKey) || { price: NaN, currency: '', ts: 0 };
                     const changed = !eq(prev.price, rec.price) || prev.currency !== rec.currency;
                     const heartbeat = !prev.ts || (t - prev.ts) >= CFG.captureHeartbeatMs;
@@ -451,7 +453,7 @@ const CFG = {
                 });
                 if (captures.length) await bgCaptureBatch(captures);
 
-                const minMap = await bgGetMinBatch(pidKeys);
+                const minMap = await bgGetMinBatch(pidKeys, preferredCurrencies);
                 const nextRendered = new Set();
                 groups.forEach((group) => {
                     const min = minMap && typeof minMap === 'object' ? minMap[group.pidKey] : null;

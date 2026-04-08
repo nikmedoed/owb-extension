@@ -3,6 +3,9 @@
 const STORAGE_KEYS = {
     mode: 'owb-default-sync-mode',
     url: 'owb-default-server-url',
+    restoreSingle: 'owb-export-restore-single',
+    restoreBatch: 'owb-export-restore-batch',
+    pageMark: 'owb-export-page-mark',
 };
 const DEFAULT_SERVER_URL = 'http://127.0.0.1:8765';
 
@@ -12,6 +15,9 @@ const modeTitleEl = document.getElementById('modeTitle');
 const setupHelpEl = document.getElementById('setupHelp');
 const syncStatusEl = document.getElementById('syncStatus');
 const dbStatusEl = document.getElementById('dbStatus');
+const restoreSingleEl = document.getElementById('restoreSingle');
+const restoreBatchEl = document.getElementById('restoreBatch');
+const pageMarkEl = document.getElementById('pageMark');
 const saveBtn = document.getElementById('saveBtn');
 const testBtn = document.getElementById('testBtn');
 const exportBtn = document.getElementById('exportBtn');
@@ -97,11 +103,17 @@ const withBusy = (busy) => {
     importReplaceBtn.disabled = busy;
     syncEnabledEl.disabled = busy;
     urlEl.disabled = busy;
+    if (restoreSingleEl) restoreSingleEl.disabled = busy;
+    if (restoreBatchEl) restoreBatchEl.disabled = busy;
+    if (pageMarkEl) pageMarkEl.disabled = busy;
 };
 
 const readForm = () => ({
     syncEnabled: !!syncEnabledEl.checked,
     url: urlEl.value.trim(),
+    restoreSingle: restoreSingleEl ? !!restoreSingleEl.checked : true,
+    restoreBatch: restoreBatchEl ? !!restoreBatchEl.checked : true,
+    pageMark: pageMarkEl ? !!pageMarkEl.checked : true,
 });
 const toMode = (values) => (values.syncEnabled && values.url ? 'sync' : 'local');
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
@@ -181,11 +193,32 @@ const resolveProbeStateAny = async () => {
 };
 
 const loadDefaults = async () => {
-    const saved = await storageGet([STORAGE_KEYS.mode, STORAGE_KEYS.url]);
+    const saved = await storageGet([
+        STORAGE_KEYS.mode,
+        STORAGE_KEYS.url,
+        STORAGE_KEYS.restoreSingle,
+        STORAGE_KEYS.restoreBatch,
+        STORAGE_KEYS.pageMark,
+    ]);
     const savedMode = hasOwn(saved, STORAGE_KEYS.mode) ? saved[STORAGE_KEYS.mode] : '';
     const savedUrl = hasOwn(saved, STORAGE_KEYS.url) ? String(saved[STORAGE_KEYS.url] || '').trim() : '';
     urlEl.value = savedUrl || DEFAULT_SERVER_URL;
     syncEnabledEl.checked = savedMode === 'sync' && !!savedUrl;
+    if (restoreSingleEl) {
+        restoreSingleEl.checked = hasOwn(saved, STORAGE_KEYS.restoreSingle)
+            ? !!saved[STORAGE_KEYS.restoreSingle]
+            : true;
+    }
+    if (restoreBatchEl) {
+        restoreBatchEl.checked = hasOwn(saved, STORAGE_KEYS.restoreBatch)
+            ? !!saved[STORAGE_KEYS.restoreBatch]
+            : true;
+    }
+    if (pageMarkEl) {
+        pageMarkEl.checked = hasOwn(saved, STORAGE_KEYS.pageMark)
+            ? !!saved[STORAGE_KEYS.pageMark]
+            : true;
+    }
     renderModeTitle();
     applySyncState(resolveSyncStateNoProbe());
 };
@@ -427,6 +460,9 @@ saveBtn.addEventListener('click', async () => {
         await storageSet({
             [STORAGE_KEYS.mode]: mode,
             [STORAGE_KEYS.url]: values.url,
+            [STORAGE_KEYS.restoreSingle]: !!values.restoreSingle,
+            [STORAGE_KEYS.restoreBatch]: !!values.restoreBatch,
+            [STORAGE_KEYS.pageMark]: !!values.pageMark,
         });
         await sendMonitor('monitor:set-config', {
             mode,

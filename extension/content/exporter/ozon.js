@@ -19,6 +19,8 @@
         saveLastExtractSessionFromItem,
         setRunExport,
         setRestoreFocus,
+        shouldRestoreFocus: shouldRestoreFocusMaybe = async () => true,
+        showExportMark: showExportMarkMaybe = async () => false,
     } = Exporter;
 
     function initOzon() {
@@ -875,7 +877,12 @@
                         mode: 'copy',
                         allReviews: opts.includeReviews !== false,
                     });
-                    await restoreCardFocus();
+                    try { await showExportMarkMaybe({ mode: 'copy', scope: 'single', market: 'ozon' }); } catch (_) {}
+                    let shouldRestore = true;
+                    try { shouldRestore = await shouldRestoreFocusMaybe('single'); } catch (_) { shouldRestore = true; }
+                    if (shouldRestore) {
+                        await restoreCardFocus({ mode: 'copy', scope: 'single', market: 'ozon' });
+                    }
                     return;
                 }
                 downloadTextFile(pack.filename, pack.text);
@@ -883,7 +890,12 @@
                     mode: 'download',
                     allReviews: opts.includeReviews !== false,
                 });
-                await restoreCardFocus();
+                try { await showExportMarkMaybe({ mode: 'download', scope: 'single', market: 'ozon' }); } catch (_) {}
+                let shouldRestore = true;
+                try { shouldRestore = await shouldRestoreFocusMaybe('single'); } catch (_) { shouldRestore = true; }
+                if (shouldRestore) {
+                    await restoreCardFocus({ mode: 'download', scope: 'single', market: 'ozon' });
+                }
             } catch (err) {
                 console.error('Ozon exporter:', err);
             }

@@ -27,7 +27,7 @@ const SYNC_CFG = {
     historyFetchTtlMs: 15000,
 };
 const DEFAULT_SERVER_URL = 'http://127.0.0.1:8765';
-const PRODUCT_SUMMARY_VERSION = 2;
+const PRODUCT_SUMMARY_VERSION = 3;
 const WB_OUTLIER_CFG = {
     minNeighborRatio: 2.5,
     maxNeighborSpread: 1.25,
@@ -51,6 +51,9 @@ const toInt = (value, fallback = 0) => {
 const eq = (a, b) => Math.abs(Number(a) - Number(b)) < 1e-9;
 const now = () => Date.now();
 const priceNorm = (value) => Math.round(Number(value) * 10000);
+const normalizeCurrency = (value) => String(value || '').trim();
+const sameCurrency = (a, b) => normalizeCurrency(a) === normalizeCurrency(b);
+const currencyBucketKey = (value) => normalizeCurrency(value) || '__empty__';
 
 const storageGet = (keys) => new Promise((resolve, reject) => {
     chrome.storage.local.get(keys, (result) => {
@@ -417,7 +420,60 @@ const getIntervalsByPid = async (pidKey, limit = 2000) => {
     return out;
 };
 
-const getMinBatch = async (pidKeys) => {
+const cloneStateMinRecord = (pidKey, state, entry) => {
+    if (!entry || !Number.isFinite(Number(entry.price))) return null;
+    return {
+        pidKey,
+        pid: String(state?.pid || ''),
+        price: Number(entry.price),
+        currency: normalizeCurrency(entry.currency),
+        firstTs: toInt(entry.firstTs, 0),
+        lastTs: toInt(entry.lastTs, 0),
+    };
+};
+
+const pickCurrencyMinFromState = (state, preferredCurrency = '') => {
+    if (!state || typeof state !== 'object') return null;
+    const currencyMins = state.currencyMins && typeof state.currencyMins === 'object'
+        ? state.currencyMins
+        : null;
+    const cleanPreferred = normalizeCurrency(preferredCurrency);
+    if (cleanPreferred && currencyMins) {
+        return currencyMins[currencyBucketKey(cleanPreferred)] || null;
+    }
+    if (cleanPreferred) return null;
+    if (currencyMins) {
+        const lastEntry = currencyMins[currencyBucketKey(state.lastCurrency)] || null;
+        if (lastEntry) return lastEntry;
+        let newest = null;
+        Object.values(currencyMins).forEach((entry) => {
+            if (!entry || !Number.isFinite(Number(entry.price))) return;
+            if (!newest) {
+                newest = entry;
+                return;
+            }
+            const entryTs = toInt(entry.lastSeenTs, toInt(entry.lastTs, 0));
+            const newestTs = toInt(newest.lastSeenTs, toInt(newest.lastTs, 0));
+            if (entryTs > newestTs) {
+                newest = entry;
+                return;
+            }
+            if (entryTs === newestTs && Number(entry.price) < Number(newest.price)) newest = entry;
+        });
+        if (newest) return newest;
+    }
+    if (!Number.isFinite(Number(state.minPrice))) return null;
+    return {
+        price: Number(state.minPrice),
+        currency: normalizeCurrency(state.minCurrency),
+        firstTs: toInt(state.minFirstTs, 0),
+        lastTs: toInt(state.minLastTs, 0),
+        intervalKey: String(state.minIntervalKey || ''),
+        lastSeenTs: toInt(state.lastTs, 0),
+    };
+};
+
+const getMinBatch = async (pidKeys, preferredCurrencies = {}) => {
     const keys = [...new Set((Array.isArray(pidKeys) ? pidKeys : []).map((k) => String(k || '').trim()).filter(Boolean))];
     if (!keys.length) return {};
     await ensureProductSummaries(keys);
@@ -427,14 +483,11 @@ const getMinBatch = async (pidKeys) => {
     const out = {};
     for (const pidKey of keys) {
         const state = await idbReq(store.get(pidKey));
-        if (!state || !Number.isFinite(Number(state.minPrice))) continue;
-        out[pidKey] = {
-            pidKey,
-            price: Number(state.minPrice),
-            currency: String(state.minCurrency || ''),
-            firstTs: toInt(state.minFirstTs, 0),
-            lastTs: toInt(state.minLastTs, 0),
-        };
+        const preferredCurrency = normalizeCurrency(preferredCurrencies?.[pidKey]);
+        const entry = pickCurrencyMinFromState(state, preferredCurrency);
+        const record = cloneStateMinRecord(pidKey, state, entry);
+        if (!record) continue;
+        out[pidKey] = record;
     }
     await txDone(tx);
     return out;
@@ -720,6 +773,18 @@ const sortIntervalsForPid = (rows) => [...(Array.isArray(rows) ? rows : [])]
         return String(a.key || '').localeCompare(String(b.key || ''));
     });
 
+const pickLatestInterval = (rows) => {
+    const list = Array.isArray(rows) ? rows : [];
+    if (!list.length) return null;
+    return list.slice().sort((a, b) => {
+        const byLast = toInt(a.lastTs, 0) - toInt(b.lastTs, 0);
+        if (byLast !== 0) return byLast;
+        const byFirst = toInt(a.firstTs, 0) - toInt(b.firstTs, 0);
+        if (byFirst !== 0) return byFirst;
+        return String(a.key || '').localeCompare(String(b.key || ''));
+    }).pop() || null;
+};
+
 const isWbOutlierInterval = (intervals, index, market) => {
     if (resolveMarket(market, intervals[index]?.pidKey) !== 'wb') return false;
     if (index <= 0 || index >= intervals.length - 1) return false;
@@ -754,10 +819,38 @@ const isWbOutlierInterval = (intervals, index, market) => {
     return true;
 };
 
-const filterIntervalsForUsage = (rows, market) => {
+const filterIntervalsByMarketHeuristics = (rows, market) => {
     const intervals = sortIntervalsForPid(rows);
     if (resolveMarket(market, intervals[0]?.pidKey) !== 'wb' || intervals.length < 3) return intervals;
     return intervals.filter((_, index) => !isWbOutlierInterval(intervals, index, market));
+};
+
+const selectUsageCurrency = (rows, preferredCurrency = '') => {
+    const intervals = sortIntervalsForPid(rows);
+    if (!intervals.length) return '';
+    const cleanPreferred = normalizeCurrency(preferredCurrency);
+    if (cleanPreferred) return cleanPreferred;
+    const latest = pickLatestInterval(intervals);
+    const latestCurrency = normalizeCurrency(latest?.currency);
+    if (latestCurrency) return latestCurrency;
+    for (let i = intervals.length - 1; i >= 0; i -= 1) {
+        const currency = normalizeCurrency(intervals[i]?.currency);
+        if (currency) return currency;
+    }
+    return '';
+};
+
+const filterIntervalsForUsage = (rows, market, preferredCurrency = '') => {
+    const intervals = sortIntervalsForPid(rows);
+    if (!intervals.length) return [];
+    const usageCurrency = selectUsageCurrency(intervals, preferredCurrency);
+    let scoped = intervals;
+    if (usageCurrency) {
+        scoped = intervals.filter((item) => sameCurrency(item.currency, usageCurrency));
+        if (preferredCurrency && !scoped.length) return [];
+        if (!scoped.length) scoped = intervals;
+    }
+    return filterIntervalsByMarketHeuristics(scoped, market);
 };
 
 const clearProductMinFields = (state) => {
@@ -766,21 +859,12 @@ const clearProductMinFields = (state) => {
     delete state.minIntervalKey;
     delete state.minFirstTs;
     delete state.minLastTs;
+    delete state.currencyMins;
 };
 
-const buildProductSummary = (pidKey, prevState, rows) => {
-    const intervals = sortIntervalsForPid(rows);
-    if (!intervals.length) return null;
-
-    const latest = intervals.slice().sort((a, b) => {
-        const byLast = toInt(a.lastTs, 0) - toInt(b.lastTs, 0);
-        if (byLast !== 0) return byLast;
-        return toInt(a.firstTs, 0) - toInt(b.firstTs, 0);
-    }).pop();
-    const market = resolveMarket(latest?.market || prevState?.market, pidKey);
-    const filtered = filterIntervalsForUsage(intervals, market);
-    const effective = filtered.length ? filtered : intervals;
-
+const buildCurrencyMinEntry = (rows, currency) => {
+    const effective = sortIntervalsForPid(rows);
+    if (!effective.length) return null;
     let minInterval = effective[0];
     effective.forEach((item) => {
         if (Number(item.price) < Number(minInterval.price)) minInterval = item;
@@ -789,11 +873,49 @@ const buildProductSummary = (pidKey, prevState, rows) => {
     const minPriceValue = Number(minInterval.price);
     let minFirstTs = toInt(minInterval.firstTs, 0);
     let minLastTs = toInt(minInterval.lastTs, 0);
+    let lastSeenTs = 0;
     effective.forEach((item) => {
+        lastSeenTs = Math.max(lastSeenTs, toInt(item.lastTs, 0));
         if (!eq(item.price, minPriceValue)) return;
         minFirstTs = Math.min(minFirstTs, toInt(item.firstTs, 0));
         minLastTs = Math.max(minLastTs, toInt(item.lastTs, 0));
     });
+    return {
+        currency: normalizeCurrency(currency),
+        price: minPriceValue,
+        intervalKey: String(minInterval.key || ''),
+        firstTs: minFirstTs,
+        lastTs: minLastTs,
+        lastSeenTs,
+    };
+};
+
+const buildProductSummary = (pidKey, prevState, rows) => {
+    const intervals = sortIntervalsForPid(rows);
+    if (!intervals.length) return null;
+
+    const latest = pickLatestInterval(intervals);
+    const market = resolveMarket(latest?.market || prevState?.market, pidKey);
+    const grouped = new Map();
+    intervals.forEach((item) => {
+        const key = currencyBucketKey(item.currency);
+        if (!grouped.has(key)) grouped.set(key, { currency: normalizeCurrency(item.currency), rows: [] });
+        grouped.get(key).rows.push(item);
+    });
+    const currencyMins = {};
+    grouped.forEach((group, key) => {
+        const filtered = filterIntervalsByMarketHeuristics(group.rows, market);
+        const entry = buildCurrencyMinEntry(filtered.length ? filtered : group.rows, group.currency);
+        if (entry) currencyMins[key] = entry;
+    });
+    const selectedMin = pickCurrencyMinFromState(
+        {
+            ...prevState,
+            lastCurrency: normalizeCurrency(latest?.currency),
+            currencyMins,
+        },
+        '',
+    );
 
     const state = prevState ? { ...prevState } : { pidKey, createdAt: now() };
     state.pidKey = pidKey;
@@ -807,16 +929,20 @@ const buildProductSummary = (pidKey, prevState, rows) => {
     );
     state.lastIntervalKey = String(latest?.key || state.lastIntervalKey || '');
     state.lastPrice = Number(latest?.price);
-    state.lastCurrency = String(latest?.currency || '');
+    state.lastCurrency = normalizeCurrency(latest?.currency);
     state.lastTs = toInt(latest?.lastTs, 0);
-    state.minPrice = minPriceValue;
-    state.minCurrency = String(minInterval.currency || '');
-    state.minIntervalKey = String(minInterval.key || '');
-    state.minFirstTs = minFirstTs;
-    state.minLastTs = minLastTs;
+    state.currencyMins = currencyMins;
+    if (selectedMin && Number.isFinite(Number(selectedMin.price))) {
+        state.minPrice = Number(selectedMin.price);
+        state.minCurrency = normalizeCurrency(selectedMin.currency);
+        state.minIntervalKey = String(selectedMin.intervalKey || '');
+        state.minFirstTs = toInt(selectedMin.firstTs, 0);
+        state.minLastTs = toInt(selectedMin.lastTs, 0);
+    } else {
+        clearProductMinFields(state);
+    }
     state.summaryVersion = PRODUCT_SUMMARY_VERSION;
     state.summaryUpdatedAt = now();
-    if (!Number.isFinite(Number(state.minPrice))) clearProductMinFields(state);
     return state;
 };
 
@@ -1308,11 +1434,21 @@ const fetchServerHistoryForPid = async (cfg, pidKey) => {
     return { ok: true, merged };
 };
 
-const fetchServerMinsForPidKeys = async (cfg, pidKeys) => {
+const fetchServerMinsForPidKeys = async (cfg, pidKeys, preferredCurrencies = {}) => {
+    const preferred = {};
+    (Array.isArray(pidKeys) ? pidKeys : []).forEach((pidKey) => {
+        const cleanPidKey = String(pidKey || '').trim();
+        const currency = normalizeCurrency(preferredCurrencies?.[cleanPidKey]);
+        if (!cleanPidKey || !currency) return;
+        preferred[cleanPidKey] = currency;
+    });
     const response = await serverFetchJson(cfg.serverUrl, '/api/min-batch', {
         method: 'POST',
         timeoutMs: Math.max(SYNC_CFG.requestTimeoutMs, 3000),
-        body: { pidKeys },
+        body: {
+            pidKeys,
+            preferredCurrencies: preferred,
+        },
     });
     if (!response.ok || response.data?.status !== 'ok') return { ok: false };
     const minsPayload = response.data?.mins;
@@ -1331,7 +1467,7 @@ const fetchServerMinsForPidKeys = async (cfg, pidKeys) => {
     return { ok: true, merged };
 };
 
-const getMergedHistoryByPid = async (pidKey, limit = 5000) => {
+const getMergedHistoryByPid = async (pidKey, limit = 5000, preferredCurrency = '') => {
     const cleanPidKey = String(pidKey || '').trim();
     if (!cleanPidKey) return [];
     const cfg = await loadSyncConfig();
@@ -1344,14 +1480,14 @@ const getMergedHistoryByPid = async (pidKey, limit = 5000) => {
         }
     }
     const intervals = await getIntervalsByPid(cleanPidKey, limit);
-    return filterIntervalsForUsage(intervals, cleanPidKey);
+    return filterIntervalsForUsage(intervals, cleanPidKey, preferredCurrency);
 };
 
-const getMergedMinBatch = async (pidKeys) => {
+const getMergedMinBatch = async (pidKeys, preferredCurrencies = {}) => {
     const keys = [...new Set((Array.isArray(pidKeys) ? pidKeys : []).map((k) => String(k || '').trim()).filter(Boolean))];
     if (!keys.length) return {};
 
-    const localMins = await getMinBatch(keys);
+    const localMins = await getMinBatch(keys, preferredCurrencies);
     const cfg = await loadSyncConfig();
     if (cfg.mode === 'sync' && cfg.serverUrl) {
         await maybeAutoSync('min-request');
@@ -1363,11 +1499,11 @@ const getMergedMinBatch = async (pidKeys) => {
             return (ts - lastFetched) >= SYNC_CFG.minFetchTtlMs;
         });
         if (toFetch.length && canProbeServer()) {
-            const fetched = await fetchServerMinsForPidKeys(cfg, toFetch);
+            const fetched = await fetchServerMinsForPidKeys(cfg, toFetch, preferredCurrencies);
             if (fetched.ok) toFetch.forEach((pidKey) => SYNC_STATE.minFetchedAt.set(pidKey, ts));
         }
     }
-    return getMinBatch(keys);
+    return getMinBatch(keys, preferredCurrencies);
 };
 
 const LAST_EXTRACT_SESSION_KEY = 'owb-last-extract-session';
@@ -1692,6 +1828,11 @@ const runWindowExportBatch = async (opts = {}) => {
             await sendMessageToTab(tab.id, {
                 scope: 'owb-export',
                 action: 'restore-card-focus',
+                options: {
+                    mode,
+                    market: item.market || '',
+                    scope: 'batch',
+                },
             }).catch(() => null);
         } catch (err) {
             failures.push({
@@ -1831,9 +1972,29 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             return { ok: true, data };
         }
         case 'owb:price-history':
-            return { ok: true, data: { pidKey: message.pidKey || '', intervals: await getMergedHistoryByPid(message.pidKey, message.limit || 5000) } };
+            return {
+                ok: true,
+                data: {
+                    pidKey: message.pidKey || '',
+                    intervals: await getMergedHistoryByPid(
+                        message.pidKey,
+                        message.limit || 5000,
+                        normalizeCurrency(message.preferredCurrency || message.payload?.preferredCurrency),
+                    ),
+                },
+            };
         case 'owb:price-min-batch':
-            return { ok: true, data: await getMergedMinBatch(message.pidKeys || []) };
+            return {
+                ok: true,
+                data: await getMergedMinBatch(
+                    message.pidKeys || [],
+                    message.preferredCurrencies && typeof message.preferredCurrencies === 'object'
+                        ? message.preferredCurrencies
+                        : (message.payload?.preferredCurrencies && typeof message.payload.preferredCurrencies === 'object'
+                            ? message.payload.preferredCurrencies
+                            : {}),
+                ),
+            };
         case 'owb:price-export':
             return { ok: true, data: await exportPriceDb() };
         case 'owb:price-inspect':

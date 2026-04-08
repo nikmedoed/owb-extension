@@ -156,7 +156,13 @@
             || findArticleByLabel(document.querySelector('#section-characteristics'))
             || '';
         if (!pid) return null;
-        return { market: 'ozon', pid, pidKey: `ozon:${pid}` };
+        const priceInfo = getPrice();
+        return {
+            market: 'ozon',
+            pid,
+            pidKey: `ozon:${pid}`,
+            currency: priceInfo?.currency || '',
+        };
     };
 
     setCurrentProductDetector(detectCurrentProduct);

@@ -18,6 +18,9 @@
         copyToClipboard,
         saveLastExtractSessionFromItem,
         setRunExport,
+        setRestoreFocus,
+        shouldRestoreFocus: shouldRestoreFocusMaybe = async () => true,
+        showExportMark: showExportMarkMaybe = async () => false,
     } = Exporter;
 
     function initWB() {
@@ -26,8 +29,8 @@
             || document.querySelector('ins[class^="priceBlockFinalPrice"], ins[class*=" priceBlockFinalPrice"]')
             || document.querySelector('span[class^="priceBlockPrice"], span[class*=" priceBlockPrice"], [class*="priceBlock"] [class*="price"], [class*="orderBlock"] [class*="price"]');
         async function loadWBReviews(max = 100) {
-            const DELAY = 550;
-            const MAX_IDLE = 10;
+            const DELAY = 420;
+            const MAX_IDLE = 6;
             const target = Math.max(1, Number(max) || 100);
             let idle = 0;
             let prev = 0;
@@ -94,25 +97,38 @@
                 await sleep(45);
             }
         };
+        const waitForVariantTiles = async (timeoutMs = 3600) => {
+            const started = Date.now();
+            let root = null;
+            let tiles = [];
+            while ((Date.now() - started) < timeoutMs) {
+                root = document.querySelector('.product-feedbacks__main-wrapper, [class*="product-feedbacks__main"]');
+                tiles = getReviewVariantTiles(root);
+                if (root && tiles.length >= 2) return { root, tiles };
+                await sleep(120);
+            }
+            return { root, tiles };
+        };
         const switchWBReviewsToFirstSpecificVariant = async () => {
-            const root = document.querySelector('.product-feedbacks__main-wrapper, [class*="product-feedbacks__main"]');
-            if (!root) return true;
-            const tiles = getReviewVariantTiles(root);
-            if (tiles.length < 2 || !isAllVariantTile(tiles[0])) return true;
+            const { root, tiles } = await waitForVariantTiles(3800);
+            if (!root) return false;
+            if (tiles.length < 2 || !isAllVariantTile(tiles[0])) return false;
             const target = tiles[1];
             const label = getTileLabel(target);
             if (!label) return false;
-            for (let i = 0; i < 4; i += 1) {
-                if (isReviewsFilteredByLabel(label)) return true;
+            if (isReviewsFilteredByLabel(label)) return true;
+            const deadline = Date.now() + 3000;
+            while (Date.now() < deadline) {
                 try { target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'auto' }); } catch (_) {}
                 await clickVariantTile(target);
-                const start = Date.now();
-                while (Date.now() - start < 950) {
+                await sleep(160);
+                const waitStart = Date.now();
+                while ((Date.now() - waitStart) < 760) {
                     if (isReviewsFilteredByLabel(label)) return true;
-                    await sleep(140);
+                    await sleep(95);
                 }
             }
-            return false;
+            return isReviewsFilteredByLabel(label);
         };
 
         const getWBPidKey = () => {
@@ -120,12 +136,28 @@
             const m = path.match(/\/catalog\/(\d{4,})\/detail/i) || path.match(/\/catalog\/(\d{4,})\/feedbacks/i);
             return m && m[1] ? `wb:${m[1]}` : '';
         };
+        const restoreCardFocus = async () => {
+            const path = String(location.pathname || '');
+            const isFeedbacks = /\/catalog\/\d{4,}\/feedbacks/i.test(path);
+            if (!isFeedbacks) return;
+
+            if (window.history.length > 1) {
+                window.history.back();
+                await sleep(280);
+                return;
+            }
+
+            const detailPath = path.replace(/\/feedbacks(\/|$)/i, '/detail$1');
+            if (detailPath && detailPath !== path) {
+                location.assign(`${location.origin}${detailPath}${location.search || ''}`);
+            }
+        };
+        setRestoreFocus(restoreCardFocus);
         async function buildWBExportPackage(opts = {}) {
             const includeReviews = opts.includeReviews !== false;
             const switchToVariant = opts.switchToVariant !== false;
             const url = location.href;
-            const header = document.querySelector('[class^="productHeaderWrap"], .product-page__header-wrap');
-            if (!header) throw new Error('Карточка WB не распознана');
+            const header = document.querySelector('[class^="productHeaderWrap"], .product-page__header-wrap') || document;
             const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
             const digits = (value) => String(value || '').replace(/[^\d]/g, '');
             const normalizeBrand = (value) => clean(value)
@@ -241,16 +273,21 @@
             ];
 
             // reviews
-            if (includeReviews && reviewsLink) {
-                reviewsLink.click();
-                await wait('.product-feedbacks__main, [class*="product-feedbacks__main"]', 10000);
-                await sleep(300);
+            const isFeedbacksPage = /\/catalog\/\d{4,}\/feedbacks/i.test(String(location.pathname || ''));
+            const hasFeedbackRoot = !!document.querySelector('.product-feedbacks__main, [class*="product-feedbacks__main"], #product-feedbacks');
+            if (includeReviews && (reviewsLink || isFeedbacksPage || hasFeedbackRoot)) {
+                if (reviewsLink && !isFeedbacksPage) {
+                    try { reviewsLink.click(); } catch (_) {}
+                }
+                await wait('.product-feedbacks__main, [class*="product-feedbacks__main"], #product-feedbacks', 12000);
+                await sleep(340);
                 if (switchToVariant) {
                     const switched = await switchWBReviewsToFirstSpecificVariant();
                     if (!switched) {
-                        throw new Error('Не удалось переключить отзывы WB на конкретный вариант (вторая плитка после "Все").');
+                        console.warn('[OWB] WB variant switch failed, continue with current reviews scope');
+                    } else {
+                        await sleep(180);
                     }
-                    await sleep(180);
                 }
                 const expectedReviews = Math.max(1, Math.min(100, Number(reviewsTotal) || 100));
                 const revs = await loadWBReviews(expectedReviews);
@@ -308,21 +345,38 @@
         }
 
         async function exportWB(opts = {}) {
-            const copyOnly = !!opts.copyOnly;
-            const pack = await buildWBExportPackage(opts);
-            if (copyOnly) {
-                await copyToClipboard(pack.text);
+            try {
+                const copyOnly = !!opts.copyOnly;
+                const pack = await buildWBExportPackage(opts);
+                if (copyOnly) {
+                    await copyToClipboard(pack.text);
+                    await saveLastExtractSessionFromItem(pack, {
+                        mode: 'copy',
+                        allReviews: opts.includeReviews !== false,
+                    });
+                    try { await showExportMarkMaybe({ mode: 'copy', scope: 'single', market: 'wb' }); } catch (_) {}
+                    let shouldRestore = true;
+                    try { shouldRestore = await shouldRestoreFocusMaybe('single'); } catch (_) { shouldRestore = true; }
+                    if (shouldRestore) {
+                        await restoreCardFocus({ mode: 'copy', scope: 'single', market: 'wb' });
+                    }
+                    return;
+                }
+                downloadTextFile(pack.filename, pack.text);
                 await saveLastExtractSessionFromItem(pack, {
-                    mode: 'copy',
+                    mode: 'download',
                     allReviews: opts.includeReviews !== false,
                 });
-                return;
+                try { await showExportMarkMaybe({ mode: 'download', scope: 'single', market: 'wb' }); } catch (_) {}
+                let shouldRestore = true;
+                try { shouldRestore = await shouldRestoreFocusMaybe('single'); } catch (_) { shouldRestore = true; }
+                if (shouldRestore) {
+                    await restoreCardFocus({ mode: 'download', scope: 'single', market: 'wb' });
+                }
+            } catch (err) {
+                console.error('WB exporter:', err);
+                throw err;
             }
-            downloadTextFile(pack.filename, pack.text);
-            await saveLastExtractSessionFromItem(pack, {
-                mode: 'download',
-                allReviews: opts.includeReviews !== false,
-            });
         }
         setRunExport(async (opts = {}) => {
             const allReviews = opts.allReviews === true;

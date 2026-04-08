@@ -45,6 +45,10 @@ def now_ms() -> int:
     return int(time() * 1000)
 
 
+def normalize_currency(value: Any) -> str:
+    return str(value or "").strip()
+
+
 def init_db() -> None:
     with DB_LOCK:
         cur = DB_CONN.cursor()
@@ -251,6 +255,45 @@ class PriceStore:
         if not row:
             raise RuntimeError("Interval row was not found after write")
         return row
+
+    @staticmethod
+    def _pick_latest_row(rows: Iterable[sqlite3.Row]) -> Optional[sqlite3.Row]:
+        rows_list = list(rows)
+        if not rows_list:
+            return None
+        return max(
+            rows_list,
+            key=lambda row: (int(row["last_ts"]), int(row["first_ts"]), int(row["id"])),
+        )
+
+    @staticmethod
+    def _pick_min_row(rows: Iterable[sqlite3.Row]) -> Optional[sqlite3.Row]:
+        rows_list = list(rows)
+        if not rows_list:
+            return None
+        return min(
+            rows_list,
+            key=lambda row: (float(row["price"]), int(row["first_ts"]), -int(row["last_ts"]), int(row["id"])),
+        )
+
+    def _select_rows_for_usage(
+        self,
+        rows: Iterable[sqlite3.Row],
+        preferred_currency: str = "",
+    ) -> List[sqlite3.Row]:
+        rows_list = list(rows)
+        if not rows_list:
+            return []
+        clean_preferred = normalize_currency(preferred_currency)
+        if clean_preferred:
+            return [row for row in rows_list if normalize_currency(row["currency"]) == clean_preferred]
+        latest = self._pick_latest_row(rows_list)
+        latest_currency = normalize_currency(latest["currency"]) if latest else ""
+        if latest_currency:
+            scoped = [row for row in rows_list if normalize_currency(row["currency"]) == latest_currency]
+            if scoped:
+                return scoped
+        return rows_list
 
     def history(self, pid_key: str) -> List[Dict[str, Any]]:
         with self.lock:
@@ -477,12 +520,17 @@ class PriceStore:
             "intervals": out,
         }
 
-    def min_batch(self, pid_keys: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+    def min_batch(
+        self,
+        pid_keys: Iterable[str],
+        preferred_currencies: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Dict[str, Any]]:
         clean_keys = [str(k or "").strip() for k in pid_keys]
         clean_keys = [k for k in clean_keys if k]
         if not clean_keys:
             return {}
         out: Dict[str, Dict[str, Any]] = {}
+        preferred_map = preferred_currencies if isinstance(preferred_currencies, dict) else {}
         with self.lock:
             cur = self.conn.cursor()
             for pid_key in clean_keys:
@@ -491,12 +539,13 @@ class PriceStore:
                     SELECT id, pid_key, pid, price, currency, first_ts, last_ts, updated_ts
                     FROM price_intervals
                     WHERE pid_key=?
-                    ORDER BY price ASC, first_ts ASC, last_ts DESC, id ASC
-                    LIMIT 1
+                    ORDER BY first_ts ASC, last_ts ASC, id ASC
                     """,
                     (pid_key,),
                 )
-                row = cur.fetchone()
+                rows = cur.fetchall()
+                scoped_rows = self._select_rows_for_usage(rows, preferred_map.get(pid_key, ""))
+                row = self._pick_min_row(scoped_rows)
                 if not row:
                     continue
                 out[pid_key] = {
@@ -629,13 +678,17 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/min-batch":
             pid_keys = payload.get("pidKeys")
+            preferred_currencies = payload.get("preferredCurrencies")
             if not isinstance(pid_keys, list):
                 write_json(self, {"error": "pidKeys array is required"}, status=400)
                 return
             if len(pid_keys) > 3000:
                 write_json(self, {"error": "too many pidKeys, max 3000"}, status=400)
                 return
-            mins = STORE.min_batch(pid_keys)
+            if preferred_currencies is not None and not isinstance(preferred_currencies, dict):
+                write_json(self, {"error": "preferredCurrencies must be an object"}, status=400)
+                return
+            mins = STORE.min_batch(pid_keys, preferred_currencies)
             write_json(self, {"status": "ok", "count": len(mins), "mins": mins, "serverTime": now_ms()})
             return
 

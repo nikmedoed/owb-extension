@@ -24,6 +24,7 @@
 - Локальный график истории на карточке.
 - Фоновая синхронизация между устройствами через сервер.
 - Автоматическая миграция старых snapshot-записей в интервалы (и на сервере, и в userscript).
+- Минимумы и графики считаются отдельно по активной валюте товара, без смешивания `RUB` и `AMD`.
 
 ## Установка userscript
 Установить:
@@ -57,6 +58,7 @@ PRICE_SERVER_HOST=0.0.0.0 PRICE_SERVER_PORT=8765 python local_price_server.py
 - `POST /api/price` — запись наблюдения цены `{pidKey,pid,price,currency,ts?}`
 - `POST /api/intervals/bulk` — bulk upsert интервалов `{intervals:[...]}`
 - `GET /api/history?pidKey=...` — история интервалов по товару
+- `POST /api/min-batch` — минимумы по товарам `{pidKeys:[...], preferredCurrencies?: { [pidKey]: currency }}`
 - `GET /api/changes?since=...&limit=...` — инкрементальная выдача изменений для pull-синхронизации
 
 ## Режимы в Tampermonkey меню

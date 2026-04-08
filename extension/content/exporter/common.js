@@ -9,12 +9,23 @@
     if (window.OWBExporter && window.OWBExporter.__initialized) return;
 
     const { addStyleOnce } = MP;
+    const EXPORT_UI_KEYS = {
+        restoreSingle: 'owb-export-restore-single',
+        restoreBatch: 'owb-export-restore-batch',
+        pageMark: 'owb-export-page-mark',
+    };
+    const EXPORT_UI_DEFAULTS = {
+        restoreSingle: true,
+        restoreBatch: true,
+        pageMark: true,
+    };
     const state = {
         runExport: null,
         restoreFocus: null,
     };
 
     const hasRuntime = () => !!(globalThis.chrome && chrome.runtime && chrome.runtime.onMessage);
+    const hasStorage = () => !!(globalThis.chrome && chrome.storage && chrome.storage.local);
 
     const ensureActionButtonsStyles = () => addStyleOnce(`
         .mp-export-actions{display:inline-flex;flex-wrap:wrap;gap:6px;margin-left:8px;vertical-align:middle}
@@ -25,6 +36,111 @@
         .mp-export-actions .mp-export-btn[data-kind="copy"]{background:#6f42c1}
         .mp-export-actions .mp-export-btn:disabled{opacity:.65;cursor:default}
     `, 'mp-export-actions');
+
+    const readExportUiPrefs = async () => {
+        if (!hasStorage()) return { ...EXPORT_UI_DEFAULTS };
+        return new Promise((resolve) => {
+            try {
+                chrome.storage.local.get([
+                    EXPORT_UI_KEYS.restoreSingle,
+                    EXPORT_UI_KEYS.restoreBatch,
+                    EXPORT_UI_KEYS.pageMark,
+                ], (raw) => {
+                    if (chrome.runtime.lastError) {
+                        resolve({ ...EXPORT_UI_DEFAULTS });
+                        return;
+                    }
+                    const hasOwn = (key) => Object.prototype.hasOwnProperty.call(raw || {}, key);
+                    resolve({
+                        restoreSingle: hasOwn(EXPORT_UI_KEYS.restoreSingle)
+                            ? !!raw[EXPORT_UI_KEYS.restoreSingle]
+                            : EXPORT_UI_DEFAULTS.restoreSingle,
+                        restoreBatch: hasOwn(EXPORT_UI_KEYS.restoreBatch)
+                            ? !!raw[EXPORT_UI_KEYS.restoreBatch]
+                            : EXPORT_UI_DEFAULTS.restoreBatch,
+                        pageMark: hasOwn(EXPORT_UI_KEYS.pageMark)
+                            ? !!raw[EXPORT_UI_KEYS.pageMark]
+                            : EXPORT_UI_DEFAULTS.pageMark,
+                    });
+                });
+            } catch (_) {
+                resolve({ ...EXPORT_UI_DEFAULTS });
+            }
+        });
+    };
+    const shouldRestoreFocus = async (scope = 'single') => {
+        try {
+            const prefs = await readExportUiPrefs();
+            return String(scope || '').toLowerCase() === 'batch'
+                ? !!prefs.restoreBatch
+                : !!prefs.restoreSingle;
+        } catch (_) {
+            return true;
+        }
+    };
+    const showExportMark = (() => {
+        let badge = null;
+        let pulseTimer = null;
+        let count = 0;
+        const ensureStyles = () => addStyleOnce(`
+            .mp-export-mark{
+                position:fixed;
+                right:14px;
+                bottom:14px;
+                width:24px;
+                height:24px;
+                border-radius:999px;
+                background:#1f7a42;
+                color:#fff;
+                display:flex;
+                align-items:center;
+                justify-content:center;
+                font:700 11px/1 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif;
+                box-shadow:0 6px 16px rgba(0,0,0,.24);
+                border:1px solid rgba(255,255,255,.28);
+                z-index:2147483647;
+                pointer-events:none;
+                opacity:.86;
+                transform:scale(1);
+                transition:transform .16s ease, opacity .22s ease;
+            }
+            .mp-export-mark[data-mode="copy"]{background:#6f42c1}
+            .mp-export-mark[data-mode="download"]{background:#1f7a42}
+        `, 'mp-export-mark');
+        return async (options = {}) => {
+            let prefs = { ...EXPORT_UI_DEFAULTS };
+            try {
+                prefs = await readExportUiPrefs();
+            } catch (_) {}
+            if (!prefs.pageMark) return false;
+            ensureStyles();
+            if (!badge) {
+                badge = document.createElement('div');
+                badge.className = 'mp-export-mark';
+                badge.setAttribute('aria-hidden', 'true');
+                badge.textContent = '1';
+                const root = document.body || document.documentElement;
+                if (!root) return false;
+                root.appendChild(badge);
+            }
+            count += 1;
+            const mode = String(options.mode || '').toLowerCase() === 'copy' ? 'copy' : 'download';
+            badge.dataset.mode = mode;
+            badge.textContent = count > 99 ? '99+' : String(count);
+            const modeLabel = mode === 'copy' ? 'буфер' : 'файл';
+            const scope = String(options.scope || 'single').toLowerCase() === 'batch' ? 'массовый' : 'штучный';
+            badge.title = `OWB: ${modeLabel}, ${scope}, ${new Date().toLocaleTimeString('ru-RU')}`;
+            badge.style.opacity = '.98';
+            badge.style.transform = 'scale(1.14)';
+            if (pulseTimer) clearTimeout(pulseTimer);
+            pulseTimer = setTimeout(() => {
+                if (!badge) return;
+                badge.style.opacity = '.86';
+                badge.style.transform = 'scale(1)';
+            }, 220);
+            return true;
+        };
+    })();
 
     const copyToClipboard = async (text) => {
         try {
@@ -151,8 +267,13 @@
                     return { copied: true };
                 }
                 if (action === 'restore-card-focus') {
-                    if (typeof state.restoreFocus === 'function') {
-                        await state.restoreFocus(message.options || {});
+                    const options = message.options || {};
+                    try { await showExportMark(options); } catch (_) {}
+                    const scope = String(options.scope || 'batch').toLowerCase() === 'single' ? 'single' : 'batch';
+                    let allowed = true;
+                    try { allowed = await shouldRestoreFocus(scope); } catch (_) { allowed = true; }
+                    if (allowed && typeof state.restoreFocus === 'function') {
+                        await state.restoreFocus(options);
                     }
                     return { restored: true };
                 }
@@ -173,6 +294,8 @@
         attachActionButtons,
         copyToClipboard,
         saveLastExtractSessionFromItem,
+        shouldRestoreFocus,
+        showExportMark,
         setRunExport: (handler) => {
             state.runExport = typeof handler === 'function' ? handler : null;
         },
