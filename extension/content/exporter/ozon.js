@@ -230,6 +230,32 @@
                 if (t.length > 60) return false;
                 return true;
             };
+            const normalizeFactLabel = (value) => clean(value).replace(/[:\s]+$/, '').trim();
+            const getDescriptionFactRows = (maxDocY = Infinity) => {
+                const rows = [];
+                const nodes = [...document.querySelectorAll('[data-widget="webDescription"], #section-description, [id*="section-description"]')];
+                const roots = [...new Set(nodes
+                    .map((node) => node.closest('[data-widget="webDescription"]') || node)
+                    .filter((node) => {
+                        const y = window.scrollY + node.getBoundingClientRect().top;
+                        return Number.isFinite(y) && y <= maxDocY;
+                    }))];
+
+                roots.forEach((root) => {
+                    root.querySelectorAll('h3').forEach((h) => {
+                        const k = normalizeFactLabel(h.innerText || h.textContent || '');
+                        if (!k || /^(описание|о товаре|характеристики)$/i.test(k)) return;
+                        let next = h.nextElementSibling;
+                        while (next && /^script|style$/i.test(next.tagName || '')) {
+                            next = next.nextElementSibling;
+                        }
+                        const v = clean(next?.innerText || next?.textContent || '');
+                        if (v && k !== v && v.length <= 2000) rows.push(`${k}: ${v}`);
+                    });
+                });
+
+                return rows;
+            };
             const scoreEntityNode = (el, text, hint = '') => {
                 const cls = String(el?.className || '').toLowerCase();
                 const href = String(el?.getAttribute?.('href') || '').toLowerCase();
@@ -414,8 +440,12 @@
                         brandFromChars = normalizeEntityText(v);
                     }
                 });
+                rows.push(...getDescriptionFactRows(window.scrollY + cSec.getBoundingClientRect().top));
                 const uniqRows = [...new Set(rows.filter(Boolean))];
                 if (uniqRows.length) chars = uniqRows.join('\n');
+            } else {
+                const descFactRows = [...new Set(getDescriptionFactRows(getRecommendationsTopY()).filter(Boolean))];
+                if (descFactRows.length) chars = descFactRows.join('\n');
             }
 
             if (isMissing(brand) && brandFromChars) brand = brandFromChars;
