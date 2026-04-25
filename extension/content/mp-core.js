@@ -187,11 +187,12 @@
             .filter(Boolean)
             .map((l) => `- ${l}`);
     };
+    MP.cleanText = (value) => String(value || '').replace(/[\u00A0\u202F]/g, ' ').replace(/\s+/g, ' ').trim();
     MP.parsePriceValue = (text) => {
         if (!text) return null;
         const normalizedText = String(text).replace(/[\u00A0\u202F]/g, ' ').replace(/\s+/g, ' ').trim();
         if (!normalizedText) return null;
-        const byCurrency = normalizedText.match(/(\d[\d\s.,]*?)\s*[₽€$֏₸]/);
+        const byCurrency = normalizedText.match(/(\d[\d\s.,]*?)\s*[₽€$£¥֏₸₺₴₹₩]/);
         const rawNumber = (byCurrency && byCurrency[1]) || (normalizedText.match(/(\d[\d\s.,]*)/) || [])[1] || '';
         if (!rawNumber) return null;
         const compact = rawNumber
@@ -206,12 +207,80 @@
     };
     MP.detectCurrency = (text) => {
         if (!text) return '';
-        if (text.includes('₽')) return '₽';
-        if (text.includes('€')) return '€';
-        if (text.includes('$')) return '$';
-        if (text.includes('֏')) return '֏';
-        if (text.includes('₸')) return '₸';
+        const raw = String(text);
+        if (raw.includes('₽')) return '₽';
+        if (raw.includes('€')) return '€';
+        if (raw.includes('$')) return '$';
+        if (raw.includes('£')) return '£';
+        if (raw.includes('¥')) return '¥';
+        if (raw.includes('֏')) return '֏';
+        if (raw.includes('₸')) return '₸';
+        if (raw.includes('₺')) return '₺';
+        if (raw.includes('₴')) return '₴';
+        if (raw.includes('₹')) return '₹';
+        if (raw.includes('₩')) return '₩';
+        const upper = raw.toUpperCase();
+        if (/\b(USD|US)\b/.test(upper)) return '$';
+        if (/\b(RUB|RUR)\b/.test(upper)) return '₽';
+        if (/\bEUR\b/.test(upper)) return '€';
+        if (/\bGBP\b/.test(upper)) return '£';
+        if (/\b(CNY|RMB|JPY)\b/.test(upper)) return '¥';
+        if (/\bKZT\b/.test(upper)) return '₸';
+        if (/\bAMD\b/.test(upper)) return '֏';
+        if (/\bTRY\b/.test(upper)) return '₺';
+        if (/\bUAH\b/.test(upper)) return '₴';
+        if (/\bINR\b/.test(upper)) return '₹';
+        if (/\bKRW\b/.test(upper)) return '₩';
         return '';
+    };
+    MP.normalizeCurrency = (value) => {
+        const raw = String(value || '').trim();
+        const detected = MP.detectCurrency(raw);
+        return detected || raw;
+    };
+    MP.getAliProductIdFromText = (text) => {
+        const raw = String(text || '');
+        const m = raw.match(/(?:productId|item_id|itemId|ae_object_value)[^\d]{0,20}(\d{8,})/i)
+            || raw.match(/\b(100\d{10,}|[1-9]\d{9,})\b/);
+        return m ? m[1] : '';
+    };
+    MP.getAliProductIdFromHref = (href, base = '') => {
+        try {
+            const url = new URL(String(href || ''), base || location.href);
+            const path = String(url.pathname || '');
+            const m = path.match(/\/item\/(\d{8,})(?:\.html)?(?:\/|$)/i)
+                || path.match(/\/item\/(\d{8,})\/reviews(?:\/|$)/i)
+                || path.match(/\/i\/(\d{8,})(?:\.html)?(?:\/|$)/i);
+            return m ? m[1] : '';
+        } catch (_) {
+            return MP.getAliProductIdFromText(href);
+        }
+    };
+    MP.getAliProductIdFromDocument = (root = document, href = '') => {
+        const fromHref = MP.getAliProductIdFromHref(href || location.href);
+        if (fromHref) return fromHref;
+        const params = new URLSearchParams(location.search || '');
+        const fromQuery = params.get('productId') || params.get('item_id') || params.get('itemId');
+        if (fromQuery && /^\d{8,}$/.test(fromQuery)) return fromQuery;
+        const source = root && root.querySelectorAll ? root : document;
+        return MP.getAliProductIdFromText([
+            ...source.querySelectorAll('[ae_object_value], [exp_product], [href*="/item/"], [href*="/i/"]'),
+        ].map((el) => [
+            el.getAttribute('ae_object_value'),
+            el.getAttribute('exp_product'),
+            el.getAttribute('href'),
+        ].filter(Boolean).join(' ')).join(' '));
+    };
+    MP.getAliCurrencyFromAttrs = (root = document) => {
+        const source = root && root.querySelector ? root : document;
+        const attrNode = source.querySelector('[exp_attribute*="currency:"], [exp_attribute*="currency%3A"]')
+            || document.querySelector('[exp_attribute*="currency:"], [exp_attribute*="currency%3A"]');
+        const raw = attrNode?.getAttribute('exp_attribute') || '';
+        const decoded = (() => {
+            try { return decodeURIComponent(raw); } catch (_) { return raw; }
+        })();
+        const m = decoded.match(/currency\s*:\s*([A-Z]{3}|US)/i);
+        return MP.normalizeCurrency(m && m[1]);
     };
     MP.formatPriceValue = (value, currency = '') => {
         if (!Number.isFinite(value)) return '—';
@@ -265,14 +334,14 @@
             if (!text) return false;
             const t = String(text).replace(/[\u00A0\u202F]/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
             if (!t) return false;
-            if (/([₽€$֏₸].*?\bза\b|\bза\b.*?[₽€$֏₸])/.test(t) && /(г|гр|кг|мл|л|шт|шту|уп|упак|пак|таб|капс|доз|порц)/.test(t)) return true;
+            if (/([₽€$£¥֏₸₺₴₹₩].*?\bза\b|\bза\b.*?[₽€$£¥֏₸₺₴₹₩])/.test(t) && /(г|гр|кг|мл|л|шт|шту|уп|упак|пак|таб|капс|доз|порц)/.test(t)) return true;
             if (/(?:\/|за)\s*\d+[.,]?\d*\s*(г|гр|кг|мл|л|шт|шту|уп|упак|пак|таб|капс|доз|порц)\b/.test(t)) return true;
             return false;
         };
         for (const n of nodes) {
             if (n.closest('.mp-min-price-badge')) continue;
             const text = (n.textContent || '').trim();
-            if (!text || !/[₽€$֏₸]/.test(text) || !/\d/.test(text)) continue;
+            if (!text || !/[₽€$£¥֏₸₺₴₹₩]/.test(text) || !/\d/.test(text)) continue;
             if (opts.ignorePerUnit !== false && isPerUnitPriceText(text)) continue;
             const price = MP.parsePriceValue(text);
             if (!Number.isFinite(price)) continue;

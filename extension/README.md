@@ -1,21 +1,23 @@
 # OWB Tools Chrome Extension (MV3)
 
-Отдельное Chrome-расширение для Ozon/WB на базе ваших Tampermonkey-скриптов.
+Отдельное Chrome-расширение для Ozon/WB/AliExpress на базе ваших Tampermonkey-скриптов.
 
 ## Что внутри
 
 - `content/exporter/common.js` - общий runtime bridge + UI кнопок экспорта
 - `content/exporter/ozon.js` - экспорт карточки Ozon (инфо/характеристики/отзывы)
 - `content/exporter/wb.js` - экспорт карточки Wildberries
+- `content/exporter/aliexpress.js` - экспорт карточки AliExpress с переходом на страницу отзывов
 - `content/price-monitor/common.js` - общий монитор цены, график, бейджи минимума, bridge
 - `content/price-monitor/ozon.js` - селекторы/парсинг/детектор товара для Ozon
 - `content/price-monitor/wb.js` - селекторы/парсинг/детектор товара для Wildberries
+- `content/price-monitor/aliexpress.js` - селекторы/парсинг/детектор товара для AliExpress
 - `content/mp-core.js` - общий core с адаптацией `GM_*` в bridge расширения
 - `background/service-worker.js` - storage API, IndexedDB истории цен, экспорт/импорт, сетевые JSON-запросы, двунаправленный sync с сервером
 - `popup/` - быстрый статус и настройки
 - `options/` - дефолты + экспорт/импорт всей БД расширения
 
-`manifest.json` разделяет content scripts по площадкам: код Ozon внедряется только на Ozon, код WB только на WB.
+`manifest.json` разделяет content scripts по площадкам: код Ozon внедряется только на Ozon, код WB только на WB, код AliExpress только на AliExpress.
 
 ## Источники, откуда перенесено
 
@@ -46,7 +48,7 @@
 1. Откройте `chrome://extensions`
 2. Включите `Developer mode`
 3. `Load unpacked` -> выберите папку `extension`
-4. Откройте карточку Ozon/WB и используйте popup расширения
+4. Откройте карточку Ozon/WB/AliExpress и используйте popup расширения
 
 ## Примечания
 

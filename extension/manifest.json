@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OWB Tools",
-  "description": "Ozon/WB exporter + price monitor with local/server sync",
+  "description": "Ozon/WB/AliExpress exporter + price monitor with local/server sync",
   "version": "0.1.0",
   "icons": {
     "16": "icons/icon16.png",
@@ -32,6 +32,8 @@
     "*://*.wildberries.kg/*",
     "*://*.wildberries.ge/*",
     "*://*.wb.ru/*",
+    "*://*.aliexpress.ru/*",
+    "*://*.aliexpress.com/*",
     "http://127.0.0.1/*",
     "http://localhost/*",
     "http://[::1]/*",
@@ -85,6 +87,20 @@
         "content/exporter/wb.js",
         "content/price-monitor/common.js",
         "content/price-monitor/wb.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "*://*.aliexpress.ru/*",
+        "*://*.aliexpress.com/*"
+      ],
+      "js": [
+        "content/mp-core.js",
+        "content/exporter/common.js",
+        "content/exporter/aliexpress.js",
+        "content/price-monitor/common.js",
+        "content/price-monitor/aliexpress.js"
       ],
       "run_at": "document_idle"
     }

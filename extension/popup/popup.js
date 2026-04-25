@@ -18,7 +18,7 @@ const batchMetaLineEl = document.getElementById('batchMetaLine');
 const lastSessionTextEl = document.getElementById('lastSessionText');
 const copyLastSessionBtn = document.getElementById('copyLastSessionBtn');
 
-const MARKET_HOST_RE = /(^|\.)((ozon\.(ru|com|kz|by|uz|am|kg|ge))|(wildberries\.(ru|by|kz|uz|am|kg|ge))|(wb\.ru))$/i;
+const MARKET_HOST_RE = /(^|\.)((ozon\.(ru|com|kz|by|uz|am|kg|ge))|(wildberries\.(ru|by|kz|uz|am|kg|ge))|(wb\.ru)|(aliexpress\.(ru|com)))$/i;
 let currentProduct = null;
 
 const sendRuntimeMessage = (message) => new Promise((resolve, reject) => {
@@ -162,6 +162,12 @@ const parseProductFromUrl = (url) => {
             const m = path.match(/\/catalog\/(\d{4,})\/detail/i) || path.match(/\/catalog\/(\d{4,})\/feedbacks/i);
             if (!m) return null;
             return { market: 'wb', pid: m[1], pidKey: `wb:${m[1]}` };
+        }
+        if (host.includes('aliexpress')) {
+            const m = path.match(/\/item\/(\d{8,})(?:\.html)?(?:\/|$)/i)
+                || path.match(/\/i\/(\d{8,})(?:\.html)?(?:\/|$)/i);
+            if (!m) return null;
+            return { market: 'aliexpress', pid: m[1], pidKey: `aliexpress:${m[1]}` };
         }
         return null;
     } catch (_) {

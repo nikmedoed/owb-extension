@@ -6,13 +6,19 @@
 
     const {
         addStyleOnce,
+        cleanText,
         parsePriceValue,
         detectCurrency,
+        normalizeCurrency,
         formatPriceValue,
         extractDigits,
         findArticleByLabel,
         findBlockAnchor,
         findPriceInCard,
+        getAliProductIdFromText,
+        getAliProductIdFromHref,
+        getAliProductIdFromDocument,
+        getAliCurrencyFromAttrs,
     } = MP;
 
 const CFG = {
@@ -84,7 +90,7 @@ const CFG = {
         .mp-price-tooltip{position:absolute;pointer-events:none;background:rgba(17,17,17,0.92);color:#fff;padding:4px 6px;border-radius:4px;font-size:10px;transform:translate(-50%,-100%);white-space:nowrap;opacity:0;transition:opacity 0.1s ease}
         .mp-price-chart--floating{position:fixed;right:24px;bottom:90px;width:280px;z-index:2147483646}
         .mp-min-price-anchor{position:relative}
-        .mp-min-price-badge{position:absolute;top:6px;left:6px;background:rgba(17,17,17,0.84);color:#fff;font-size:11px;line-height:1.2;padding:4px 6px;border-radius:6px;font-weight:600;letter-spacing:0.2px;box-shadow:0 6px 12px rgba(0,0,0,0.22);z-index:6;pointer-events:none}
+        .mp-min-price-badge{position:absolute;top:6px;left:6px;background:rgba(17,17,17,0.84);color:#fff;font-size:11px;line-height:1.2;padding:4px 6px;border-radius:6px;font-weight:600;letter-spacing:0.2px;box-shadow:0 6px 12px rgba(0,0,0,0.22);z-index:6;pointer-events:none;white-space:nowrap}
         .mp-min-price-anchor--below{position:static}
         .mp-min-price-anchor--below .mp-min-price-badge{position:static;display:inline-flex;align-items:center;max-width:100%;margin-top:8px}
         .mp-min-price-anchor--below-center{position:static}
@@ -314,7 +320,7 @@ const CFG = {
     const toCaptureRecord = (pidKey, pid, priceInfo, ts = now()) => {
         const price = priceInfo && priceInfo.price != null ? Number(priceInfo.price) : NaN;
         if (!pidKey || !Number.isFinite(price)) return null;
-        const currency = String(priceInfo?.currency || '') || detectCurrency(String(priceInfo?.text || '')) || '₽';
+        const currency = String(priceInfo?.currency || '') || detectCurrency(String(priceInfo?.text || '')) || '';
         return { pidKey, pid: String(pid || ''), price, currency, ts };
     };
 
@@ -531,11 +537,17 @@ const CFG = {
         startCardScanner,
         collectGroupsFromCards,
         isBadgeCardCandidate,
+        cleanText,
         parsePriceValue,
         detectCurrency,
+        normalizeCurrency,
         extractDigits,
         findArticleByLabel,
         findBlockAnchor,
         findPriceInCard,
+        getAliProductIdFromText,
+        getAliProductIdFromHref,
+        getAliProductIdFromDocument,
+        getAliCurrencyFromAttrs,
     };
 })();

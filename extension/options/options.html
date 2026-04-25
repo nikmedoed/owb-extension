@@ -100,13 +100,20 @@
           <div id="inspectWbProducts" class="diag-kpi__value">—</div>
         </div>
         <div class="diag-kpi">
+          <div class="diag-kpi__label">AliExpress товаров (доля)</div>
+          <div id="inspectAliExpressProducts" class="diag-kpi__value">—</div>
+        </div>
+        <div class="diag-kpi">
           <div class="diag-kpi__label">Последняя запись</div>
           <div id="inspectLastActivity" class="diag-kpi__value diag-kpi__value--compact">—</div>
         </div>
-        <div class="diag-kpi">
-          <div class="diag-kpi__label">Статус</div>
-          <div id="inspectHealth" class="diag-kpi__value">—</div>
-        </div>
+      </div>
+
+      <div class="danger-row" aria-label="Сброс истории по сервису">
+        <span>Сбросить историю сервиса</span>
+        <button type="button" class="danger" data-reset-market="aliexpress">AliExpress</button>
+        <button type="button" class="danger" data-reset-market="ozon">Ozon</button>
+        <button type="button" class="danger" data-reset-market="wb">Wildberries</button>
       </div>
 
       <p id="dbStatus" class="status"></p>

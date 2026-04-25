@@ -24,15 +24,16 @@ const exportBtn = document.getElementById('exportBtn');
 const importAppendBtn = document.getElementById('importAppendBtn');
 const importReplaceBtn = document.getElementById('importReplaceBtn');
 const importFileEl = document.getElementById('importFile');
+const resetMarketBtns = [...document.querySelectorAll('[data-reset-market]')];
 const copyServerCmdBtn = document.getElementById('copyServerCmdBtn');
 const inspectMetaEl = document.getElementById('inspectMeta');
-const inspectHealthEl = document.getElementById('inspectHealth');
 const inspectTotalRecordsEl = document.getElementById('inspectTotalRecords');
 const inspectTotalProductsEl = document.getElementById('inspectTotalProducts');
 const inspectTotalIntervalsEl = document.getElementById('inspectTotalIntervals');
 const inspectAvgPerProductEl = document.getElementById('inspectAvgPerProduct');
 const inspectOzonProductsEl = document.getElementById('inspectOzonProducts');
 const inspectWbProductsEl = document.getElementById('inspectWbProducts');
+const inspectAliExpressProductsEl = document.getElementById('inspectAliExpressProducts');
 const inspectLastActivityEl = document.getElementById('inspectLastActivity');
 let pendingImportMode = 'append';
 
@@ -101,6 +102,9 @@ const withBusy = (busy) => {
     exportBtn.disabled = busy;
     importAppendBtn.disabled = busy;
     importReplaceBtn.disabled = busy;
+    resetMarketBtns.forEach((btn) => {
+        btn.disabled = busy;
+    });
     syncEnabledEl.disabled = busy;
     urlEl.disabled = busy;
     if (restoreSingleEl) restoreSingleEl.disabled = busy;
@@ -228,6 +232,7 @@ const sendMonitor = async (action, payload = null) => {
         'monitor:export-db': 'owb:price-export',
         'monitor:import-db': 'owb:price-import',
         'monitor:inspect-db': 'owb:price-inspect',
+        'monitor:reset-market': 'owb:price-reset-market',
     };
     const type = actionMap[action];
     if (!type) throw new Error('Неизвестное действие');
@@ -344,14 +349,16 @@ const inspectDbDirect = async () => {
         const intervalsCountPromise = intervalsStore ? idbReq(intervalsStore.count()) : Promise.resolve(0);
         const ozonProductsPromise = productsStore ? countByPidPrefix(productsStore, 'ozon:') : Promise.resolve(0);
         const wbProductsPromise = productsStore ? countByPidPrefix(productsStore, 'wb:') : Promise.resolve(0);
+        const aliExpressProductsPromise = productsStore ? countByPidPrefix(productsStore, 'aliexpress:') : Promise.resolve(0);
         const productsLastTsPromise = productsStore ? readLastUpdatedTs(productsStore) : Promise.resolve(0);
         const intervalsLastTsPromise = intervalsStore ? readLastUpdatedTs(intervalsStore) : Promise.resolve(0);
 
-        const [productsCountRaw, intervalsCountRaw, ozonProductsRaw, wbProductsRaw, productsLastTsRaw, intervalsLastTsRaw] = await Promise.all([
+        const [productsCountRaw, intervalsCountRaw, ozonProductsRaw, wbProductsRaw, aliExpressProductsRaw, productsLastTsRaw, intervalsLastTsRaw] = await Promise.all([
             productsCountPromise,
             intervalsCountPromise,
             ozonProductsPromise,
             wbProductsPromise,
+            aliExpressProductsPromise,
             productsLastTsPromise,
             intervalsLastTsPromise,
         ]);
@@ -361,13 +368,15 @@ const inspectDbDirect = async () => {
         const intervalsCount = Number(intervalsCountRaw) || 0;
         const ozonProducts = Number(ozonProductsRaw) || 0;
         const wbProducts = Number(wbProductsRaw) || 0;
-        const unknownProducts = Math.max(0, productsCount - ozonProducts - wbProducts);
+        const aliExpressProducts = Number(aliExpressProductsRaw) || 0;
+        const unknownProducts = Math.max(0, productsCount - ozonProducts - wbProducts - aliExpressProducts);
         const productsLastTs = Number(productsLastTsRaw) || 0;
         const intervalsLastTs = Number(intervalsLastTsRaw) || 0;
         const lastActivityTs = Math.max(productsLastTs, intervalsLastTs);
         const marketStats = [
             { market: 'ozon', products: ozonProducts, intervals: 0, lastUpdatedTs: productsLastTs },
             { market: 'wb', products: wbProducts, intervals: 0, lastUpdatedTs: productsLastTs },
+            { market: 'aliexpress', products: aliExpressProducts, intervals: 0, lastUpdatedTs: productsLastTs },
         ];
         if (unknownProducts > 0) {
             marketStats.push({ market: 'unknown', products: unknownProducts, intervals: 0, lastUpdatedTs: productsLastTs });
@@ -416,16 +425,18 @@ const renderInspect = (data) => {
     const marketMap = new Map(marketStats.map((item) => [String(item.market || '').toLowerCase(), item]));
     const ozonProducts = Number(marketMap.get('ozon')?.products || 0);
     const wbProducts = Number(marketMap.get('wb')?.products || 0);
+    const aliExpressProducts = Number(marketMap.get('aliexpress')?.products || 0);
     const ozonShare = productsCount > 0 ? (ozonProducts / productsCount) * 100 : 0;
     const wbShare = productsCount > 0 ? (wbProducts / productsCount) * 100 : 0;
+    const aliExpressShare = productsCount > 0 ? (aliExpressProducts / productsCount) * 100 : 0;
     if (inspectOzonProductsEl) inspectOzonProductsEl.textContent = `${formatNumber(ozonProducts)} (${ozonShare.toFixed(1)}%)`;
     if (inspectWbProductsEl) inspectWbProductsEl.textContent = `${formatNumber(wbProducts)} (${wbShare.toFixed(1)}%)`;
+    if (inspectAliExpressProductsEl) inspectAliExpressProductsEl.textContent = `${formatNumber(aliExpressProducts)} (${aliExpressShare.toFixed(1)}%)`;
     if (inspectLastActivityEl) {
         const formatted = formatTs(lastActivityTs);
         inspectLastActivityEl.textContent = formatted;
         inspectLastActivityEl.title = formatted;
     }
-    inspectHealthEl.textContent = totalRecords > 0 ? 'OK' : 'Пусто';
 };
 
 const inspectDb = async () => {
@@ -438,7 +449,6 @@ const inspectDb = async () => {
         const message = String(err && err.message ? err.message : err);
         setDbStatus(message, true);
         inspectMetaEl.textContent = 'Не удалось прочитать БД расширения';
-        inspectHealthEl.textContent = 'Ошибка';
         if (inspectTotalRecordsEl) inspectTotalRecordsEl.textContent = '—';
         inspectTotalProductsEl.textContent = '—';
         inspectTotalIntervalsEl.textContent = '—';
@@ -446,6 +456,37 @@ const inspectDb = async () => {
         if (inspectOzonProductsEl) inspectOzonProductsEl.textContent = '—';
         if (inspectWbProductsEl) inspectWbProductsEl.textContent = '—';
         if (inspectLastActivityEl) inspectLastActivityEl.textContent = '—';
+    } finally {
+        withBusy(false);
+    }
+};
+
+const marketLabels = {
+    ozon: 'Ozon',
+    wb: 'Wildberries',
+    aliexpress: 'AliExpress',
+};
+
+const resetSelectedMarket = async (marketValue) => {
+    const market = String(marketValue || '').trim().toLowerCase();
+    const label = marketLabels[market] || market;
+    if (!market || !marketLabels[market]) {
+        setDbStatus('Выберите сервис для сброса', true);
+        return;
+    }
+    const ok = window.confirm(`Удалить всю локальную историю цен для ${label}? Это удалит товары и интервалы только этого сервиса.`);
+    if (!ok) return;
+
+    withBusy(true);
+    setDbStatus(`Удаляю историю ${label}...`);
+    try {
+        const { data } = await sendMonitor('monitor:reset-market', { market });
+        await inspectDb();
+        const deletedProducts = Number(data?.deletedProducts || 0);
+        const deletedIntervals = Number(data?.deletedIntervals || 0);
+        setDbStatus(`История ${label} удалена: товаров ${deletedProducts}, интервалов ${deletedIntervals}`);
+    } catch (err) {
+        setDbStatus(String(err && err.message ? err.message : err), true);
     } finally {
         withBusy(false);
     }
@@ -558,6 +599,14 @@ importFileEl.addEventListener('change', async () => {
     } finally {
         withBusy(false);
     }
+});
+
+resetMarketBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+        resetSelectedMarket(btn.dataset.resetMarket).catch((err) => {
+            setDbStatus(String(err && err.message ? err.message : err), true);
+        });
+    });
 });
 
 syncEnabledEl.addEventListener('change', () => {
