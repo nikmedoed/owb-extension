@@ -256,6 +256,81 @@
 
                 return rows;
             };
+            const textOf = (el) => clean(el?.innerText || el?.textContent || '');
+            const getDescriptionRoot = (section) => {
+                if (!section) return null;
+                return section.closest?.('[data-widget="webDescription"]')
+                    || section.querySelector?.('[data-widget="webDescription"]')
+                    || section.closest?.('#section-description, [id*="section-description"]')
+                    || section.querySelector?.('#section-description, [id*="section-description"]')
+                    || section;
+            };
+            const extractDescriptionFromRoot = (root) => {
+                if (!root) return { text: '', images: [] };
+                const scope = root.querySelector?.('#section-description, [id*="section-description"]') || root;
+                const candidates = [
+                    ...scope.querySelectorAll?.('p, [class], div') || [],
+                ]
+                    .map((el) => ({ el, text: textOf(el) }))
+                    .filter(({ el, text }) => {
+                        if (!text || text.length < 30) return false;
+                        if (el.matches?.('h1, h2, h3, h4, button, a')) return false;
+                        if (el.closest?.('[data-widget="webHashtags"], [data-widget="tagList"]')) return false;
+                        if (/^Описание$/i.test(text) || /^О товаре$/i.test(text)) return false;
+                        return true;
+                    })
+                    .sort((a, b) => b.text.length - a.text.length);
+                const rawText = candidates[0]?.text || textOf(scope);
+                const text = rawText
+                    .replace(/^\s*Описание\s*/i, '')
+                    .replace(/^\s*О\s*товаре\s*/i, '')
+                    .replace(/\n{3,}/g, '\n\n')
+                    .trim();
+                const images = [...scope.querySelectorAll?.('img[src], img[data-src], source[srcset]') || []]
+                    .map((img) => img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('srcset') || '')
+                    .map((raw) => String(raw || '').split(/\s+/)[0].trim())
+                    .filter(Boolean);
+                return { text, images: [...new Set(images)] };
+            };
+            const findLoadedDescriptionRoot = () => getDescriptionRoot(document.querySelector(
+                '[data-widget="webDescription"], #section-description, [id*="section-description"]',
+            ));
+            const getCharacteristicsRoot = (section) => {
+                if (!section) return null;
+                const direct = section.closest?.('[data-widget="webCharacteristics"], #section-characteristics, [id*="section-characteristics" i]')
+                    || section.querySelector?.('[data-widget="webCharacteristics"], #section-characteristics, [id*="section-characteristics" i]');
+                if (direct) return direct;
+                let cur = section;
+                for (let i = 0; cur && i < 6; i += 1, cur = cur.parentElement) {
+                    if (cur.querySelector?.('dl dt, dl dd, tr th, tr td')) return cur;
+                }
+                return section;
+            };
+            const readCharacteristicsRows = (root) => {
+                if (!root) return { rows: [], brandFromChars: '' };
+                const rows = [];
+                let brandValue = '';
+                root.querySelectorAll('dl').forEach((dl) => {
+                    const k = normalizeFactLabel(dl.querySelector('dt')?.innerText || dl.querySelector('dt')?.textContent || '');
+                    const v = textOf(dl.querySelector('dd'));
+                    if (k && v) rows.push(`${k}: ${v}`);
+                    if (!brandValue && /^бренд$/i.test(k) && isValidEntity(v)) {
+                        brandValue = normalizeEntityText(v);
+                    }
+                });
+                root.querySelectorAll('tr').forEach((tr) => {
+                    const k = normalizeFactLabel(tr.querySelector('th, td:first-child')?.innerText || tr.querySelector('th, td:first-child')?.textContent || '');
+                    const v = textOf(tr.querySelector('td:last-child'));
+                    if (k && v && k !== v) rows.push(`${k}: ${v}`);
+                    if (!brandValue && /^бренд$/i.test(k) && isValidEntity(v)) {
+                        brandValue = normalizeEntityText(v);
+                    }
+                });
+                return { rows, brandFromChars: brandValue };
+            };
+            const findLoadedCharacteristicsRoot = () => getCharacteristicsRoot(document.querySelector(
+                '[data-widget="webCharacteristics"], #section-characteristics, [id*="section-characteristics" i], [data-widget*="characteristics" i]',
+            ));
             const scoreEntityNode = (el, text, hint = '') => {
                 const cls = String(el?.className || '').toLowerCase();
                 const href = String(el?.getAttribute?.('href') || '').toLowerCase();
@@ -387,29 +462,29 @@
                 { maxSteps: 10, stepRatio: 0.32, delay: 280, settleMs: 220, block: 'start' },
             );
             if (descSection) {
-                const descRoot = descSection.closest('[data-widget="webDescription"]') || descSection;
+                const descRoot = getDescriptionRoot(descSection);
                 clickExpandButtons(descRoot);
                 await sleep(260);
 
                 const scrollables = getScrollableCandidates(descRoot);
                 for (const sc of scrollables) await scrollInsideElement(sc);
 
-                const text = (descRoot.innerText || '')
-                    .replace(/^\s*Описание\s*/i, '')
-                    .replace(/^\s*О\s*товаре\s*/i, '')
-                    .replace(/\n{3,}/g, '\n\n')
-                    .trim();
-                const imageUrls = [...descRoot.querySelectorAll('img[src], img[data-src], source[srcset]')]
-                    .map((img) => img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('srcset') || '')
-                    .map((raw) => String(raw || '').split(/\s+/)[0].trim())
-                    .filter(Boolean);
-                const uniqImages = [...new Set(imageUrls)];
+                const { text, images: uniqImages } = extractDescriptionFromRoot(descRoot);
 
                 if (text && text.length >= 30) {
                     desc = text;
                     if (uniqImages.length >= 3) {
                         desc += `\n\n[Иллюстрации longread: ${uniqImages.length} шт.]`;
                     }
+                } else if (uniqImages.length) {
+                    const shown = uniqImages.slice(0, 30).map((u) => `- ${u}`);
+                    desc = `Лонгрид-описание в изображениях (${uniqImages.length} шт.):\n${shown.join('\n')}`;
+                }
+            }
+            if (isMissing(desc)) {
+                const { text, images: uniqImages } = extractDescriptionFromRoot(findLoadedDescriptionRoot());
+                if (text && text.length >= 30) {
+                    desc = text;
                 } else if (uniqImages.length) {
                     const shown = uniqImages.slice(0, 30).map((u) => `- ${u}`);
                     desc = `Лонгрид-описание в изображениях (${uniqImages.length} шт.):\n${shown.join('\n')}`;
@@ -423,29 +498,21 @@
                 { maxSteps: 22, stepRatio: 0.32, delay: 280, settleMs: 240, block: 'start' },
             );
             if (cSec) {
-                const rows = [];
-                cSec.querySelectorAll('dl').forEach((dl) => {
-                    const k = dl.querySelector('dt')?.innerText.replace(/[:\s]+$/, '').trim();
-                    const v = dl.querySelector('dd')?.innerText.trim();
-                    if (k && v) rows.push(`${k}: ${v}`);
-                    if (!brandFromChars && /^бренд$/i.test(String(k || '').trim()) && isValidEntity(v)) {
-                        brandFromChars = normalizeEntityText(v);
-                    }
-                });
-                cSec.querySelectorAll('tr').forEach((tr) => {
-                    const k = tr.querySelector('th, td:first-child')?.innerText.replace(/[:\s]+$/, '').trim();
-                    const v = tr.querySelector('td:last-child')?.innerText.trim();
-                    if (k && v && k !== v) rows.push(`${k}: ${v}`);
-                    if (!brandFromChars && /^бренд$/i.test(String(k || '').trim()) && isValidEntity(v)) {
-                        brandFromChars = normalizeEntityText(v);
-                    }
-                });
+                const parsed = readCharacteristicsRows(getCharacteristicsRoot(cSec));
+                const rows = parsed.rows;
+                brandFromChars = parsed.brandFromChars;
                 rows.push(...getDescriptionFactRows(window.scrollY + cSec.getBoundingClientRect().top));
                 const uniqRows = [...new Set(rows.filter(Boolean))];
                 if (uniqRows.length) chars = uniqRows.join('\n');
             } else {
                 const descFactRows = [...new Set(getDescriptionFactRows(getRecommendationsTopY()).filter(Boolean))];
                 if (descFactRows.length) chars = descFactRows.join('\n');
+            }
+            if (isMissing(chars)) {
+                const parsed = readCharacteristicsRows(findLoadedCharacteristicsRoot());
+                if (!brandFromChars) brandFromChars = parsed.brandFromChars;
+                const uniqRows = [...new Set(parsed.rows.filter(Boolean))];
+                if (uniqRows.length) chars = uniqRows.join('\n');
             }
 
             if (isMissing(brand) && brandFromChars) brand = brandFromChars;
