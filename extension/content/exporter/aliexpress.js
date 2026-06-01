@@ -52,13 +52,42 @@
     const getAliProductId = () => getAliProductIdFromDocument(document, location.href);
     const getDescriptionRoot = () => document.querySelector('[data-product-description="true"]') || document;
     const getTitleNode = () => getDescriptionRoot().querySelector('h1') || document.querySelector('h1');
-    const getPriceRoot = () => document.querySelector('[data-testid="HazeProductPrice"]')
+    const getPriceRoot = () => document.querySelector('[data-testid="HazeProductPrice"] [data-unformatted-price], [data-testid="HazeProductPrice"][data-unformatted-price]')
+        || document.querySelector('[style*="--area:price"] [data-unformatted-price], [style*="--area:price"][data-unformatted-price]')
+        || document.querySelector('#buyNowButton [exp_attribute*="finalPrice:"]')
+        || document.querySelector('[data-testid="HazeProductPrice"]')
         || document.querySelector('[data-unformatted-price]')
         || document.querySelector('#buyNowButton')?.closest('div')
         || null;
-    const getPagePrice = () => {
+    const getPriceArea = () => {
         const root = getPriceRoot();
         if (!root) return null;
+        return root.closest('[style*="--area:price"]')
+            || root.closest('[data-testid="HazeProductPrice"]')?.parentElement
+            || root.parentElement
+            || null;
+    };
+    const parsePriceFromExpAttribute = (root) => {
+        const raw = root?.getAttribute?.('exp_attribute') || '';
+        if (!raw) return null;
+        const decoded = (() => {
+            try { return decodeURIComponent(raw); } catch (_) { return raw; }
+        })();
+        const m = decoded.match(/finalPrice\s*:\s*([0-9]+(?:[.,][0-9]+)?)/i)
+            || decoded.match(/price\s*:\s*([0-9]+(?:[.,][0-9]+)?)/i);
+        if (!m) return null;
+        const price = Number(String(m[1]).replace(',', '.'));
+        if (!Number.isFinite(price)) return null;
+        const currencyMatch = decoded.match(/currency\s*:\s*([A-Z]{3}|US)/i);
+        return {
+            price,
+            currency: normalizeCurrency(currencyMatch && currencyMatch[1]),
+            text: decoded,
+        };
+    };
+    const parsePriceFromRoot = (root, defaultCurrency = '', options = {}) => {
+        if (!root) return null;
+        const allowGeneric = options.allowGeneric !== false;
         const attrValue = root.getAttribute('data-unformatted-price');
         const attrPrice = attrValue != null ? Number(String(attrValue).replace(',', '.')) : NaN;
         const text = clean(root.textContent || '');
@@ -70,14 +99,89 @@
                 text,
             };
         }
+        const expPrice = parsePriceFromExpAttribute(root);
+        if (expPrice) {
+            return {
+                price: expPrice.price,
+                currency: expPrice.currency || attrCurrency || normalizeCurrency(detectCurrency(text) || defaultCurrency),
+                text: expPrice.text || text,
+            };
+        }
+        if (!allowGeneric) return null;
         const info = findPriceInCard(root, { defaultCurrency: attrCurrency || '' });
         if (info && Number.isFinite(Number(info.price))) {
-            return { price: Number(info.price), currency: normalizeCurrency(info.currency || attrCurrency), text };
+            return { price: Number(info.price), currency: normalizeCurrency(info.currency || attrCurrency || defaultCurrency), text };
         }
         const parsed = parsePriceValue(text);
         return Number.isFinite(parsed)
-            ? { price: parsed, currency: normalizeCurrency(detectCurrency(text) || attrCurrency), text }
+            ? { price: parsed, currency: normalizeCurrency(detectCurrency(text) || attrCurrency || defaultCurrency), text }
             : null;
+    };
+    const getLeafNodes = (root) => [...(root?.querySelectorAll?.('span, div, p, strong, b') || [])]
+        .filter((node) => !node.children || node.children.length === 0);
+    const parseMoneyLeaf = (node, defaultCurrency = '') => {
+        const text = clean([
+            node?.getAttribute?.('title') || '',
+            node?.textContent || '',
+        ].filter(Boolean).join(' '));
+        if (!text || !/\d/.test(text) || /%/.test(text)) return null;
+        const currency = normalizeCurrency(detectCurrency(text) || defaultCurrency);
+        if (!currency) return null;
+        const price = parsePriceValue(text);
+        if (!Number.isFinite(price)) return null;
+        return { price, currency, text };
+    };
+    const parseDeliveryPrice = (root, preferredCurrency = '') => {
+        if (!root) return null;
+        const text = clean(root.textContent || '');
+        if (!text) return null;
+        if (/\bfree\b|бесплат/i.test(text)) {
+            return { price: 0, currency: preferredCurrency || normalizeCurrency(detectCurrency(text)), text };
+        }
+        const deliveryLeaves = getLeafNodes(root);
+        if (!root.children || root.children.length === 0) deliveryLeaves.unshift(root);
+        const leaves = deliveryLeaves
+            .map((node) => {
+                const leafText = clean([
+                    node?.getAttribute?.('title') || '',
+                    node?.textContent || '',
+                ].filter(Boolean).join(' '));
+                if (!detectCurrency(leafText)) return null;
+                return parseMoneyLeaf(node, preferredCurrency);
+            })
+            .filter((item) => item && Number.isFinite(Number(item.price)));
+        if (!leaves.length) return null;
+        const scoped = preferredCurrency
+            ? leaves.filter((item) => !item.currency || item.currency === preferredCurrency)
+            : leaves;
+        return (scoped.length ? scoped : leaves).sort((a, b) => a.price - b.price)[0] || null;
+    };
+    const findDeliveryRoot = () => {
+        const priceArea = getPriceArea();
+        return priceArea?.querySelector?.('[data-testid="RedProductDelivery"]')
+            || document.querySelector('[data-testid="RedProductDelivery"]')
+            || [...document.querySelectorAll('div, section, span, p')]
+                .filter((node) => /delivery|shipping|достав/i.test(clean(node.textContent || '')))
+                .sort((a, b) => clean(a.textContent || '').length - clean(b.textContent || '').length)[0]
+            || null;
+    };
+    const getPagePriceBreakdown = () => {
+        const priceRoot = getPriceRoot();
+        const product = parsePriceFromRoot(priceRoot, '', { allowGeneric: false })
+            || parsePriceFromRoot(priceRoot, '', { allowGeneric: true });
+        if (!product || !Number.isFinite(Number(product.price))) {
+            return { product: null, delivery: null, total: null };
+        }
+        const delivery = parseDeliveryPrice(findDeliveryRoot(), product.currency || '');
+        const deliveryPrice = delivery && Number.isFinite(Number(delivery.price)) ? Number(delivery.price) : NaN;
+        const total = Number.isFinite(deliveryPrice)
+            ? {
+                price: Number(product.price) + deliveryPrice,
+                currency: product.currency || delivery?.currency || '',
+                text: `${product.text || ''}; delivery:${delivery?.text || ''}`,
+            }
+            : null;
+        return { product, delivery, total };
     };
     const formatPrice = (info) => {
         if (!info || !Number.isFinite(Number(info.price))) return '—';
@@ -544,7 +648,7 @@
         const title = clean(getTitleNode()?.textContent || document.title || '—');
         const store = getStore();
         const rating = getRatingInfo();
-        const priceInfo = getPagePrice();
+        const priceInfo = getPagePriceBreakdown();
         const description = collectDescription();
         const chars = collectSpecs();
         const pid = getAliProductId();
@@ -555,7 +659,9 @@
             `Магазин: ${store.name}`,
             store.url ? `Ссылка магазина: ${store.url}` : '',
             `Заголовок: ${title}`,
-            `Цена: ${formatPrice(priceInfo)}`,
+            `Цена товара: ${formatPrice(priceInfo.product)}`,
+            `Доставка: ${formatPrice(priceInfo.delivery)}`,
+            `Сумма с доставкой: ${formatPrice(priceInfo.total)}`,
             `Рейтинг: ${rating.rating} (${rating.reviews} отзывов)`,
             rating.bought ? `Купили: ${rating.bought}` : '',
             '',

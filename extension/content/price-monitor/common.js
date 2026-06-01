@@ -331,6 +331,7 @@ const CFG = {
             chart: null,
             lastPrice: NaN,
             lastCurrency: '',
+            lastRecordPidKey: '',
             lastCaptureTs: 0,
             lastRenderTs: 0,
         };
@@ -345,13 +346,19 @@ const CFG = {
                     state.pidKey = '';
                     state.lastPrice = NaN;
                     state.lastCurrency = '';
+                    state.lastRecordPidKey = '';
                     state.lastCaptureTs = 0;
                     state.lastRenderTs = 0;
                     return;
                 }
 
                 const pid = await opts.getPid();
-                if (pid) state.pidKey = `${opts.market}:${pid}`;
+                const pidKey = typeof opts.getPidKey === 'function' ? opts.getPidKey(pid) : '';
+                const nextPidKey = pidKey || (pid ? `${opts.market}:${pid}` : '');
+                if (nextPidKey && nextPidKey !== state.pidKey) {
+                    state.pidKey = nextPidKey;
+                    state.lastRenderTs = 0;
+                }
                 const priceInfo = opts.getPrice();
                 const anchor = opts.getAnchor ? opts.getAnchor() : null;
                 state.chart = ensureChartContainer(state.chart, anchor, !anchor);
@@ -359,10 +366,11 @@ const CFG = {
                 const record = toCaptureRecord(state.pidKey, pid, priceInfo);
                 let captured = false;
                 if (record) {
-                    const changed = !eq(state.lastPrice, record.price) || state.lastCurrency !== record.currency;
+                    const changed = state.lastRecordPidKey !== record.pidKey || !eq(state.lastPrice, record.price) || state.lastCurrency !== record.currency;
                     const heartbeat = !state.lastCaptureTs || (now() - state.lastCaptureTs) >= CFG.captureHeartbeatMs;
                     if (changed || heartbeat) {
                         await bgCaptureBatch([record]);
+                        state.lastRecordPidKey = record.pidKey;
                         state.lastPrice = record.price;
                         state.lastCurrency = record.currency;
                         state.lastCaptureTs = now();

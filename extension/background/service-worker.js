@@ -27,7 +27,7 @@ const SYNC_CFG = {
     historyFetchTtlMs: 15000,
 };
 const DEFAULT_SERVER_URL = 'http://127.0.0.1:8765';
-const PRODUCT_SUMMARY_VERSION = 5;
+const PRODUCT_SUMMARY_VERSION = 6;
 const WB_OUTLIER_CFG = {
     minNeighborRatio: 2.5,
     maxNeighborSpread: 1.25,
@@ -35,11 +35,23 @@ const WB_OUTLIER_CFG = {
     maxRelativeDuration: 0.35,
 };
 const ALI_OUTLIER_CFG = {
-    maxNeighborSpread: 1.15,
-    lowRatio: 0.45,
-    highRatio: 2.5,
+    maxNeighborSpread: 1.25,
+    lowRatio: 0.65,
+    highRatio: 1.8,
     minRelativeDelta: 0.35,
     minAbsoluteDelta: 20,
+    minAbsoluteDeltaByCurrency: {
+        '$': 0.5,
+        '€': 0.5,
+        '£': 0.5,
+        '¥': 50,
+        '֏': 200,
+        '₸': 250,
+        '₺': 15,
+        '₴': 20,
+        '₹': 40,
+        '₩': 700,
+    },
     maxDurationMs: 45 * 60 * 1000,
 };
 
@@ -915,9 +927,10 @@ const isAliExpressIsolatedOutlier = (intervals, index, market) => {
     const neighborMid = (prevPrice + nextPrice) / 2;
     if ((neighborMax / neighborMin) > ALI_OUTLIER_CFG.maxNeighborSpread) return false;
 
-    const relativeDelta = Math.abs(currentPrice - neighborMid) / Math.max(1, neighborMid);
+    const relativeDelta = Math.abs(currentPrice - neighborMid) / Math.max(0.01, neighborMid);
     const absoluteDelta = Math.abs(currentPrice - neighborMid);
-    if (relativeDelta < ALI_OUTLIER_CFG.minRelativeDelta && absoluteDelta < ALI_OUTLIER_CFG.minAbsoluteDelta) return false;
+    const minAbsoluteDelta = ALI_OUTLIER_CFG.minAbsoluteDeltaByCurrency[currency] || ALI_OUTLIER_CFG.minAbsoluteDelta;
+    if (relativeDelta < ALI_OUTLIER_CFG.minRelativeDelta || absoluteDelta < minAbsoluteDelta) return false;
 
     const tooLow = currentPrice <= neighborMin * ALI_OUTLIER_CFG.lowRatio;
     const tooHigh = currentPrice >= neighborMax * ALI_OUTLIER_CFG.highRatio;

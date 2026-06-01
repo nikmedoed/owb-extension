@@ -93,6 +93,7 @@
             const href = card.querySelector('a[href*="/product/"]')?.getAttribute('href') || '';
             const m = href.match(/\/product\/[^/]*?(\d{5,})(?:\/|\?|$)/) || href.match(/-(\d{5,})(?:\/|\?|$)/);
             if (m) return m[1];
+            if (isOzonCartCard(card)) return '';
             const image = card.querySelector('img');
             const fromImg = extractIdFromOzonMedia(image?.getAttribute('src'))
                 || extractIdFromOzonMedia(image?.getAttribute('srcset'))
