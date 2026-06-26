@@ -2,7 +2,7 @@
 
 Chrome-расширение для Ozon/WB/AliExpress на базе ваших Tampermonkey-скриптов.
 
-Эта папка должна быть самодостаточной для `Load unpacked`. Content bundles пересобираются из корня репозитория:
+Эта папка должна быть самодостаточной для `Load unpacked`. Content bundles пересобираются из этой папки:
 
 ```powershell
 npm install
@@ -17,16 +17,18 @@ npm run build:local
 - `content/exporter/ozon.js` - экспорт карточки Ozon (инфо/характеристики/отзывы)
 - `content/exporter/wb.js` - экспорт карточки Wildberries
 - `content/exporter/aliexpress.js` - экспорт карточки AliExpress с переходом на страницу отзывов
+- `content/exporter/amazon.js` - экспорт карточки Amazon
 - `content/price-monitor/common.js` - общий монитор цены, график, бейджи минимума, bridge
 - `content/price-monitor/ozon.js` - селекторы/парсинг/детектор товара для Ozon
 - `content/price-monitor/wb.js` - селекторы/парсинг/детектор товара для Wildberries
 - `content/price-monitor/aliexpress.js` - селекторы/парсинг/детектор товара для AliExpress
+- `content/price-monitor/amazon.js` - селекторы/парсинг/детектор товара для Amazon
 - `content/mp-core.js` - общий core с адаптацией `GM_*` в bridge расширения
 - `background/service-worker.js` - storage API, IndexedDB истории цен, экспорт/импорт, сетевые JSON-запросы, двунаправленный sync с сервером
 - `popup/` - быстрый статус и настройки
 - `options/` - дефолты + экспорт/импорт всей БД расширения
 
-`manifest.json` разделяет content scripts по площадкам и подключает по одному bundled entrypoint на маркетплейс: `content/ozon.js`, `content/wb.js`, `content/aliexpress.js`.
+`manifest.json` разделяет content scripts по площадкам и подключает по одному bundled entrypoint на маркетплейс: `content/ozon.js`, `content/wb.js`, `content/aliexpress.js`, `content/amazon.js`.
 
 ## Источники, откуда перенесено
 
@@ -52,6 +54,8 @@ npm run build:local
 - запрос минимумов карточек использует выборочную загрузку (`POST /api/min-batch`);
 - запрос истории товара использует выборочную загрузку (`GET /api/history?pidKey=...`).
 
+`manifest.key` закрепляет extension ID для unpacked-установки. Это важно для IndexedDB: Chrome хранит историю цен отдельно для каждого ID расширения. Если переносите историю из старой копии, используйте `Options` -> `Экспорт базы`, затем в новой копии `Дополнить базу` или `Заменить базу`.
+
 ## Запуск
 
 1. Откройте `chrome://extensions`
@@ -61,5 +65,6 @@ npm run build:local
 
 ## Примечания
 
+- Все Node.js-зависимости и scripts живут в этой папке.
 - Для новых профилей задайте дефолты в `Options`
 - Экспорт/импорт в `Options` работает напрямую с БД расширения (без необходимости открывать карточку товара)

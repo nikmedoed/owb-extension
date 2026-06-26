@@ -909,7 +909,7 @@ const resetMergedPriceHistoryByPid = async (pidKey) => {
 
 const resetPriceHistoryByMarket = async (market) => {
     const cleanMarket = String(market || '').trim().toLowerCase();
-    if (!['ozon', 'wb', 'aliexpress'].includes(cleanMarket)) {
+    if (!['ozon', 'wb', 'aliexpress', 'amazon'].includes(cleanMarket)) {
         throw new Error('Unknown market');
     }
     const prefix = `${cleanMarket}:`;
@@ -977,9 +977,9 @@ const readNewestByIndex = (store, indexName, limit = 20) => new Promise((resolve
 
 const resolveMarket = (value, pidKey = '') => {
     const direct = String(value || '').trim().toLowerCase();
-    if (direct === 'ozon' || direct === 'wb' || direct === 'aliexpress') return direct;
+    if (direct === 'ozon' || direct === 'wb' || direct === 'aliexpress' || direct === 'amazon') return direct;
     const prefix = String(pidKey || '').split(':')[0].trim().toLowerCase();
-    if (prefix === 'ozon' || prefix === 'wb' || prefix === 'aliexpress') return prefix;
+    if (prefix === 'ozon' || prefix === 'wb' || prefix === 'aliexpress' || prefix === 'amazon') return prefix;
     return 'unknown';
 };
 
@@ -1331,7 +1331,7 @@ const inspectPriceDb = async (opts = {}) => {
         });
     });
     const marketStats = [...mergedMarketStatsMap.values()].sort((a, b) => {
-        const rank = { ozon: 1, wb: 2, aliexpress: 3, unknown: 4 };
+        const rank = { ozon: 1, wb: 2, aliexpress: 3, amazon: 4, unknown: 5 };
         return (rank[a.market] || 9) - (rank[b.market] || 9);
     });
     const totalProducts = Number(productsCount) || 0;
@@ -1908,7 +1908,7 @@ const waitTabComplete = async (tabId, timeoutMs = 25000) => {
         timer = setTimeout(() => finish(), Math.max(3000, Number(timeoutMs) || 25000));
     });
 };
-const MARKET_HOST_RE = /(^|\.)((ozon\.(ru|com|kz|by|uz|am|kg|ge))|(wildberries\.(ru|by|kz|uz|am|kg|ge))|(wb\.ru)|(aliexpress\.(ru|com)))$/i;
+const MARKET_HOST_RE = /(^|\.)((ozon\.(ru|com|kz|by|uz|am|kg|ge))|(wildberries\.(ru|by|kz|uz|am|kg|ge))|(wb\.ru)|(aliexpress\.(ru|com))|(amazon\.com))$/i;
 const parseMarketProductFromUrl = (url) => {
     try {
         const u = new URL(String(url || ''));
@@ -1932,6 +1932,12 @@ const parseMarketProductFromUrl = (url) => {
                 || path.match(/\/i\/(\d{8,})(?:\.html)?(?:\/|$)/i);
             if (!m) return null;
             return { market: 'aliexpress', pid: m[1], pidKey: `aliexpress:${m[1]}` };
+        }
+        if (host.includes('amazon.')) {
+            const m = path.match(/\/(?:dp|gp\/product|exec\/obidos\/ASIN)\/([A-Z0-9]{10})(?:[/?#]|$)/i);
+            if (!m) return null;
+            const asin = String(m[1] || '').toUpperCase();
+            return { market: 'amazon', pid: asin, pidKey: `amazon:${asin}` };
         }
         return null;
     } catch (_) {
@@ -2156,6 +2162,61 @@ const collectAliExpressReviewsInTempTab = async (payload = {}, sender = {}) => {
         }
         if (!response || !response.ok) {
             throw new Error((response && response.error) || lastError || 'AliExpress reviews collection failed');
+        }
+        return response.data || { header: 'Отзывы: блок отзывов не найден', items: [] };
+    } finally {
+        if (restoreWindowId != null) await windowsUpdate(restoreWindowId, { focused: true });
+        if (restoreTabId != null) await tabsUpdate(restoreTabId, { active: true }).catch(() => null);
+        if (tab && Number.isFinite(Number(tab.id))) {
+            await tabsRemove(tab.id).catch(() => null);
+        }
+    }
+};
+const collectAmazonReviewsInTempTab = async (payload = {}, sender = {}) => {
+    const url = String(payload.url || '').trim();
+    if (!url || !/^https:\/\/[^/]*amazon\.com\/product-reviews\/[A-Z0-9]{10}/i.test(url)) {
+        throw new Error('Invalid Amazon reviews URL');
+    }
+    let tab = null;
+    let restoreTabId = null;
+    let restoreWindowId = null;
+    try {
+        const senderTab = sender && sender.tab ? sender.tab : null;
+        restoreWindowId = Number.isFinite(Number(senderTab?.windowId)) ? Number(senderTab.windowId) : null;
+        const activeTabs = restoreWindowId != null ? await tabsQuery({ windowId: restoreWindowId, active: true }).catch(() => []) : [];
+        restoreTabId = Number.isFinite(Number(activeTabs[0]?.id)) ? Number(activeTabs[0].id) : null;
+        const createProps = {
+            url,
+            active: true,
+        };
+        if (Number.isFinite(Number(senderTab?.windowId))) createProps.windowId = Number(senderTab.windowId);
+        if (Number.isFinite(Number(senderTab?.index))) createProps.index = Number(senderTab.index) + 1;
+        tab = await tabsCreate(createProps);
+        if (!tab || !Number.isFinite(Number(tab.id))) throw new Error('Cannot open Amazon reviews tab');
+        if (Number.isFinite(Number(tab.windowId))) await windowsUpdate(tab.windowId, { focused: true });
+        await tabsUpdate(tab.id, { active: true }).catch(() => null);
+        await waitTabComplete(tab.id, 35000);
+        await sleepMs(1400);
+        let response = null;
+        let lastError = '';
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+            try {
+                response = await sendMessageToTab(tab.id, {
+                    scope: 'owb-amazon-reviews',
+                    action: 'collect-reviews',
+                    payload: {
+                        maxReviews: payload.maxReviews || 100,
+                    },
+                });
+                lastError = '';
+                break;
+            } catch (err) {
+                lastError = String(err && err.message ? err.message : err);
+                await sleepMs(450);
+            }
+        }
+        if (!response || !response.ok) {
+            throw new Error((response && response.error) || lastError || 'Amazon reviews collection failed');
         }
         return response.data || { header: 'Отзывы: блок отзывов не найден', items: [] };
     } finally {
@@ -2408,6 +2469,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             return { ok: true, data: await saveLastExtractSession(message.payload || {}) };
         case 'owb:ali-collect-reviews':
             return { ok: true, data: await collectAliExpressReviewsInTempTab(message.payload || {}, _sender || {}) };
+        case 'owb:amazon-collect-reviews':
+            return { ok: true, data: await collectAmazonReviewsInTempTab(message.payload || {}, _sender || {}) };
         case 'owb:tabs-close-duplicates':
             return { ok: true, data: await closeDuplicateTabsInWindow(message.payload || {}) };
         default:

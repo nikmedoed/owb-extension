@@ -36,6 +36,9 @@ const CFG = {
         const n = Math.trunc(Number(value));
         return Number.isFinite(n) ? n : fallback;
     };
+    const errorText = (err) => String(err && err.message ? err.message : err);
+    const isRuntimeInvalidatedError = (err) => /Extension context invalidated|message channel closed|Extension runtime is unavailable/i.test(errorText(err));
+    const isRuntimeTransientError = (err) => /Runtime message timeout|Receiving end does not exist|The message port closed before a response was received/i.test(errorText(err));
 
     const sendRuntimeMessage = (payload, timeoutMs = 15000) => new Promise((resolve, reject) => {
         if (!hasRuntime()) {
@@ -389,8 +392,10 @@ const CFG = {
             lastRecordPidKey: '',
             lastCaptureTs: 0,
             lastRenderTs: 0,
+            stopped: false,
         };
         const tick = async () => {
+            if (state.stopped) return;
             if (state.running) return;
             state.running = true;
             try {
@@ -444,12 +449,18 @@ const CFG = {
                     renderChart(state.chart, [], { currency: '₽' });
                 }
             } catch (err) {
+                if (isRuntimeInvalidatedError(err)) {
+                    state.stopped = true;
+                    if (state.intervalId) clearInterval(state.intervalId);
+                    return;
+                }
+                if (isRuntimeTransientError(err)) return;
                 console.warn('[OWB] product tracker failed:', err);
             } finally {
                 state.running = false;
             }
         };
-        setInterval(tick, CFG.productPollMs);
+        state.intervalId = setInterval(tick, CFG.productPollMs);
         tick();
     };
 
@@ -504,9 +515,11 @@ const CFG = {
 
     const startCardScanner = (opts) => {
         let running = false;
+        let stopped = false;
         const captureState = new Map();
         let renderedCards = new Set();
         const tick = async () => {
+            if (stopped) return;
             if (running) return;
             running = true;
             try {
@@ -550,12 +563,18 @@ const CFG = {
                 });
                 renderedCards = nextRendered;
             } catch (err) {
+                if (isRuntimeInvalidatedError(err)) {
+                    stopped = true;
+                    if (intervalId) clearInterval(intervalId);
+                    return;
+                }
+                if (isRuntimeTransientError(err)) return;
                 console.warn('[OWB] card scanner failed:', err);
             } finally {
                 running = false;
             }
         };
-        setInterval(tick, CFG.cardPollMs);
+        const intervalId = setInterval(tick, CFG.cardPollMs);
         tick();
     };
     let currentProductDetector = null;

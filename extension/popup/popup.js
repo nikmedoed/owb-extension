@@ -19,7 +19,7 @@ const batchMetaLineEl = document.getElementById('batchMetaLine');
 const lastSessionTextEl = document.getElementById('lastSessionText');
 const copyLastSessionBtn = document.getElementById('copyLastSessionBtn');
 
-const MARKET_HOST_RE = /(^|\.)((ozon\.(ru|com|kz|by|uz|am|kg|ge))|(wildberries\.(ru|by|kz|uz|am|kg|ge))|(wb\.ru)|(aliexpress\.(ru|com)))$/i;
+const MARKET_HOST_RE = /(^|\.)((ozon\.(ru|com|kz|by|uz|am|kg|ge))|(wildberries\.(ru|by|kz|uz|am|kg|ge))|(wb\.ru)|(aliexpress\.(ru|com))|(amazon\.com))$/i;
 let currentProduct = null;
 let currentIntervalCount = 0;
 
@@ -178,6 +178,12 @@ const parseProductFromUrl = (url) => {
                 || path.match(/\/i\/(\d{8,})(?:\.html)?(?:\/|$)/i);
             if (!m) return null;
             return { market: 'aliexpress', pid: m[1], pidKey: `aliexpress:${m[1]}` };
+        }
+        if (host.includes('amazon.')) {
+            const m = path.match(/\/(?:dp|gp\/product|exec\/obidos\/ASIN)\/([A-Z0-9]{10})(?:[/?#]|$)/i);
+            if (!m) return null;
+            const asin = String(m[1] || '').toUpperCase();
+            return { market: 'amazon', pid: asin, pidKey: `amazon:${asin}` };
         }
         return null;
     } catch (_) {

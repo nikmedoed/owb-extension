@@ -2,9 +2,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import esbuild from "esbuild";
 
-const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const extensionDir = path.join(rootDir, "extension");
-const contentMarkets = ["ozon", "wb", "aliexpress"];
+const extensionDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const contentMarkets = ["ozon", "wb", "aliexpress", "amazon"];
 
 await esbuild.build({
   entryPoints: Object.fromEntries(

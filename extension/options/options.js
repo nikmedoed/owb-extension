@@ -34,6 +34,7 @@ const inspectAvgPerProductEl = document.getElementById('inspectAvgPerProduct');
 const inspectOzonProductsEl = document.getElementById('inspectOzonProducts');
 const inspectWbProductsEl = document.getElementById('inspectWbProducts');
 const inspectAliExpressProductsEl = document.getElementById('inspectAliExpressProducts');
+const inspectAmazonProductsEl = document.getElementById('inspectAmazonProducts');
 const inspectLastActivityEl = document.getElementById('inspectLastActivity');
 let pendingImportMode = 'append';
 
@@ -280,11 +281,67 @@ const txDone = (tx) => new Promise((resolve, reject) => {
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error);
 });
-const openLocalPriceDb = () => new Promise((resolve, reject) => {
+const ensureLocalPriceDbSchema = (db, tx) => {
+    const hasStore = (name) => db.objectStoreNames.contains(name);
+    const getStore = (name) => {
+        try {
+            return tx ? tx.objectStore(name) : null;
+        } catch (_) {
+            return null;
+        }
+    };
+    const hasIndex = (store, name) => {
+        try {
+            return !!store && !!store.indexNames && Array.from(store.indexNames).includes(name);
+        } catch (_) {
+            return false;
+        }
+    };
+    const ensureIndex = (store, name, keyPath) => {
+        if (!store || hasIndex(store, name)) return;
+        store.createIndex(name, keyPath, { unique: false });
+    };
+
+    if (!hasStore(PRICE_DB.intervals)) {
+        const store = db.createObjectStore(PRICE_DB.intervals, { keyPath: 'key' });
+        store.createIndex('byPidFirst', ['pidKey', 'firstTs'], { unique: false });
+        store.createIndex('byPidLast', ['pidKey', 'lastTs'], { unique: false });
+        store.createIndex('byUpdated', 'updatedAt', { unique: false });
+    } else {
+        const store = getStore(PRICE_DB.intervals);
+        ensureIndex(store, 'byPidFirst', ['pidKey', 'firstTs']);
+        ensureIndex(store, 'byPidLast', ['pidKey', 'lastTs']);
+        ensureIndex(store, 'byUpdated', 'updatedAt');
+    }
+
+    if (!hasStore(PRICE_DB.products)) {
+        const store = db.createObjectStore(PRICE_DB.products, { keyPath: 'pidKey' });
+        store.createIndex('byUpdated', 'updatedAt', { unique: false });
+    } else {
+        ensureIndex(getStore(PRICE_DB.products), 'byUpdated', 'updatedAt');
+    }
+};
+const openLocalPriceDbRaw = () => new Promise((resolve, reject) => {
     const req = indexedDB.open(PRICE_DB.name, PRICE_DB.version);
+    req.onupgradeneeded = () => ensureLocalPriceDbSchema(req.result, req.transaction);
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error || new Error('Не удалось открыть IndexedDB'));
 });
+const deleteLocalPriceDb = () => new Promise((resolve, reject) => {
+    const req = indexedDB.deleteDatabase(PRICE_DB.name);
+    req.onsuccess = () => resolve(true);
+    req.onerror = () => reject(req.error || new Error('Не удалось пересоздать IndexedDB'));
+    req.onblocked = () => reject(new Error('IndexedDB занята другой вкладкой. Закройте страницы расширения и повторите импорт.'));
+});
+const openLocalPriceDb = async () => {
+    const db = await openLocalPriceDbRaw();
+    if (db.objectStoreNames.contains(PRICE_DB.intervals) && db.objectStoreNames.contains(PRICE_DB.products)) {
+        return db;
+    }
+    db.close();
+    await deleteLocalPriceDb();
+    return openLocalPriceDbRaw();
+};
 const countByPidPrefix = (store, prefix) => new Promise((resolve) => {
     const start = String(prefix || '').trim();
     if (!start) {
@@ -350,15 +407,17 @@ const inspectDbDirect = async () => {
         const ozonProductsPromise = productsStore ? countByPidPrefix(productsStore, 'ozon:') : Promise.resolve(0);
         const wbProductsPromise = productsStore ? countByPidPrefix(productsStore, 'wb:') : Promise.resolve(0);
         const aliExpressProductsPromise = productsStore ? countByPidPrefix(productsStore, 'aliexpress:') : Promise.resolve(0);
+        const amazonProductsPromise = productsStore ? countByPidPrefix(productsStore, 'amazon:') : Promise.resolve(0);
         const productsLastTsPromise = productsStore ? readLastUpdatedTs(productsStore) : Promise.resolve(0);
         const intervalsLastTsPromise = intervalsStore ? readLastUpdatedTs(intervalsStore) : Promise.resolve(0);
 
-        const [productsCountRaw, intervalsCountRaw, ozonProductsRaw, wbProductsRaw, aliExpressProductsRaw, productsLastTsRaw, intervalsLastTsRaw] = await Promise.all([
+        const [productsCountRaw, intervalsCountRaw, ozonProductsRaw, wbProductsRaw, aliExpressProductsRaw, amazonProductsRaw, productsLastTsRaw, intervalsLastTsRaw] = await Promise.all([
             productsCountPromise,
             intervalsCountPromise,
             ozonProductsPromise,
             wbProductsPromise,
             aliExpressProductsPromise,
+            amazonProductsPromise,
             productsLastTsPromise,
             intervalsLastTsPromise,
         ]);
@@ -369,7 +428,8 @@ const inspectDbDirect = async () => {
         const ozonProducts = Number(ozonProductsRaw) || 0;
         const wbProducts = Number(wbProductsRaw) || 0;
         const aliExpressProducts = Number(aliExpressProductsRaw) || 0;
-        const unknownProducts = Math.max(0, productsCount - ozonProducts - wbProducts - aliExpressProducts);
+        const amazonProducts = Number(amazonProductsRaw) || 0;
+        const unknownProducts = Math.max(0, productsCount - ozonProducts - wbProducts - aliExpressProducts - amazonProducts);
         const productsLastTs = Number(productsLastTsRaw) || 0;
         const intervalsLastTs = Number(intervalsLastTsRaw) || 0;
         const lastActivityTs = Math.max(productsLastTs, intervalsLastTs);
@@ -377,6 +437,7 @@ const inspectDbDirect = async () => {
             { market: 'ozon', products: ozonProducts, intervals: 0, lastUpdatedTs: productsLastTs },
             { market: 'wb', products: wbProducts, intervals: 0, lastUpdatedTs: productsLastTs },
             { market: 'aliexpress', products: aliExpressProducts, intervals: 0, lastUpdatedTs: productsLastTs },
+            { market: 'amazon', products: amazonProducts, intervals: 0, lastUpdatedTs: productsLastTs },
         ];
         if (unknownProducts > 0) {
             marketStats.push({ market: 'unknown', products: unknownProducts, intervals: 0, lastUpdatedTs: productsLastTs });
@@ -398,6 +459,95 @@ const inspectDbDirect = async () => {
             marketStats,
             newestProducts: [],
             newestIntervals: [],
+        };
+    } finally {
+        db.close();
+    }
+};
+
+const readAllFromStore = (store) => new Promise((resolve, reject) => {
+    const out = [];
+    const req = store.openCursor();
+    req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) {
+            resolve(out);
+            return;
+        }
+        out.push(cursor.value);
+        cursor.continue();
+    };
+    req.onerror = () => reject(req.error || new Error('Не удалось прочитать IndexedDB'));
+});
+
+const exportDbDirect = async () => {
+    const db = await openLocalPriceDb();
+    try {
+        const tx = db.transaction([PRICE_DB.intervals, PRICE_DB.products], 'readonly');
+        const intervalsStore = tx.objectStore(PRICE_DB.intervals);
+        const productsStore = tx.objectStore(PRICE_DB.products);
+        const [intervals, products] = await Promise.all([
+            readAllFromStore(intervalsStore),
+            readAllFromStore(productsStore),
+        ]);
+        await txDone(tx);
+        return {
+            schema: 'owb-price-history-ext-v1',
+            exportedAt: Date.now(),
+            dbName: PRICE_DB.name,
+            dbVersion: db.version,
+            intervals: { count: intervals.length, records: intervals },
+            products: { count: products.length, records: products },
+        };
+    } finally {
+        db.close();
+    }
+};
+
+const clearDbDirect = async (db) => {
+    const tx = db.transaction([PRICE_DB.intervals, PRICE_DB.products], 'readwrite');
+    tx.objectStore(PRICE_DB.intervals).clear();
+    tx.objectStore(PRICE_DB.products).clear();
+    await txDone(tx);
+};
+
+const putRecordsInBatches = async (db, storeName, records, batchSize = 1000) => {
+    const list = Array.isArray(records) ? records : [];
+    let stored = 0;
+    for (let i = 0; i < list.length; i += batchSize) {
+        const batch = list.slice(i, i + batchSize).filter(Boolean);
+        if (!batch.length) continue;
+        const tx = db.transaction(storeName, 'readwrite');
+        const store = tx.objectStore(storeName);
+        batch.forEach((record) => store.put(record));
+        await txDone(tx);
+        stored += batch.length;
+    }
+    return stored;
+};
+
+const importDbDirect = async (payload, mode = 'append') => {
+    const source = payload && typeof payload === 'object' && payload.data && typeof payload.data === 'object'
+        ? payload.data
+        : payload;
+    const intervalRecords = Array.isArray(source?.intervals?.records) ? source.intervals.records : [];
+    const productRecords = Array.isArray(source?.products?.records) ? source.products.records : [];
+    if (!intervalRecords.length && !productRecords.length) {
+        throw new Error('Файл не похож на экспорт OWB Tools: нет intervals.records/products.records');
+    }
+
+    const db = await openLocalPriceDb();
+    try {
+        if (mode === 'replace') {
+            await clearDbDirect(db);
+        }
+        const importedIntervals = await putRecordsInBatches(db, PRICE_DB.intervals, intervalRecords);
+        const importedProducts = await putRecordsInBatches(db, PRICE_DB.products, productRecords);
+        return {
+            mode,
+            imported: importedIntervals + importedProducts,
+            intervals: importedIntervals,
+            products: importedProducts,
         };
     } finally {
         db.close();
@@ -426,12 +576,15 @@ const renderInspect = (data) => {
     const ozonProducts = Number(marketMap.get('ozon')?.products || 0);
     const wbProducts = Number(marketMap.get('wb')?.products || 0);
     const aliExpressProducts = Number(marketMap.get('aliexpress')?.products || 0);
+    const amazonProducts = Number(marketMap.get('amazon')?.products || 0);
     const ozonShare = productsCount > 0 ? (ozonProducts / productsCount) * 100 : 0;
     const wbShare = productsCount > 0 ? (wbProducts / productsCount) * 100 : 0;
     const aliExpressShare = productsCount > 0 ? (aliExpressProducts / productsCount) * 100 : 0;
+    const amazonShare = productsCount > 0 ? (amazonProducts / productsCount) * 100 : 0;
     if (inspectOzonProductsEl) inspectOzonProductsEl.textContent = `${formatNumber(ozonProducts)} (${ozonShare.toFixed(1)}%)`;
     if (inspectWbProductsEl) inspectWbProductsEl.textContent = `${formatNumber(wbProducts)} (${wbShare.toFixed(1)}%)`;
     if (inspectAliExpressProductsEl) inspectAliExpressProductsEl.textContent = `${formatNumber(aliExpressProducts)} (${aliExpressShare.toFixed(1)}%)`;
+    if (inspectAmazonProductsEl) inspectAmazonProductsEl.textContent = `${formatNumber(amazonProducts)} (${amazonShare.toFixed(1)}%)`;
     if (inspectLastActivityEl) {
         const formatted = formatTs(lastActivityTs);
         inspectLastActivityEl.textContent = formatted;
@@ -455,6 +608,8 @@ const inspectDb = async () => {
         inspectAvgPerProductEl.textContent = '—';
         if (inspectOzonProductsEl) inspectOzonProductsEl.textContent = '—';
         if (inspectWbProductsEl) inspectWbProductsEl.textContent = '—';
+        if (inspectAliExpressProductsEl) inspectAliExpressProductsEl.textContent = '—';
+        if (inspectAmazonProductsEl) inspectAmazonProductsEl.textContent = '—';
         if (inspectLastActivityEl) inspectLastActivityEl.textContent = '—';
     } finally {
         withBusy(false);
@@ -465,6 +620,7 @@ const marketLabels = {
     ozon: 'Ozon',
     wb: 'Wildberries',
     aliexpress: 'AliExpress',
+    amazon: 'Amazon',
 };
 
 const resetSelectedMarket = async (marketValue) => {
@@ -547,7 +703,7 @@ exportBtn.addEventListener('click', async () => {
     withBusy(true);
     setDbStatus('Экспортирую историю...');
     try {
-        const { data } = await sendMonitor('monitor:export-db');
+        const data = await exportDbDirect();
         const json = JSON.stringify(data || {}, null, 2);
         const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
         const url = URL.createObjectURL(blob);
@@ -588,12 +744,13 @@ importFileEl.addEventListener('change', async () => {
         const text = await file.text();
         const payload = JSON.parse(text);
         const mode = pendingImportMode === 'replace' ? 'replace' : 'append';
-        const { data } = await sendMonitor('monitor:import-db', { mode, data: payload });
+        const data = await importDbDirect(payload, mode);
         const imported = data && Number.isFinite(data.imported) ? data.imported : 0;
         const products = data && Number.isFinite(data.products) ? data.products : 0;
+        const intervals = data && Number.isFinite(data.intervals) ? data.intervals : 0;
         const modeText = mode === 'replace' ? 'замена' : 'дополнение';
         await inspectDb();
-        setDbStatus(`Импорт (${modeText}) завершен: ${imported} записей, ${products} товаров`);
+        setDbStatus(`Импорт (${modeText}) завершен: ${imported} записей, товаров ${products}, интервалов ${intervals}`);
     } catch (err) {
         setDbStatus(String(err && err.message ? err.message : err), true);
     } finally {

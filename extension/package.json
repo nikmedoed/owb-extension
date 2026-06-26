@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
+    "build:dev": "node scripts/dev.mjs",
     "build:local": "node scripts/build-local.mjs",
     "build": "node scripts/build.mjs",
-    "prepare": "git config core.hooksPath .githooks"
+    "prepare": "git config core.hooksPath extension/.githooks"
   },
   "devDependencies": {
     "esbuild": "^0.25.4"

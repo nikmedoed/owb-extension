@@ -12,7 +12,7 @@
 ## Что в репозитории
 
 - `extension/` - Chrome extension (Manifest V3) с committed local build-артефактами.
-- `scripts/` - сборка local/release через `esbuild`.
+- `extension/scripts/` - сборка local/release через `esbuild`.
 - `server/` - локальный HTTP API сервер синхронизации на Python + SQLite.
 
 ## Ключевая функциональность
@@ -95,10 +95,27 @@
 
 ## Сборка
 
-- `npm run build:local` - пересобирает committed content bundles в `extension/content/*.js`. Эта команда запускается автоматически перед коммитом.
-- `npm run dev` - watch-режим для тех же локальных bundles.
-- `npm run build` - собирает минифицированную release-папку вне репозитория: `../owb-tools-release` по умолчанию. Путь можно переопределить через `RELEASE_DIR`.
-- `npm install` включает git hook через `prepare`; hook перед коммитом пересобирает и добавляет generated bundles в индекс.
+Node.js-проект сборки находится внутри `extension/`, чтобы не смешивать его с сервером.
+
+- `cd extension && npm install` - ставит зависимости сборки и включает git hook через `prepare`.
+- `cd extension && npm run build:local` - пересобирает committed content bundles в `extension/content/*.js`. Эта команда запускается автоматически перед коммитом.
+- `cd extension && npm run dev` - watch-режим для тех же локальных bundles.
+- `cd extension && npm run build` - собирает минифицированную release-папку вне репозитория: `../owb-tools-release` относительно корня проекта. Путь можно переопределить через `RELEASE_DIR`.
+
+## Перенос Истории Между Установками
+
+История цен хранится в IndexedDB внутри Chrome и привязана к extension ID. Если расширение раньше было загружено из другой папки без фиксированного `manifest.key`, Chrome мог выдать ему другой ID.
+
+Для переноса:
+
+1. Откройте старую установленную копию расширения в Chrome.
+2. Перейдите в `Options`.
+3. В блоке `База данных` нажмите `Экспорт базы`.
+4. Загрузите новую копию из `extension/`.
+5. В новой копии откройте `Options`.
+6. Нажмите `Дополнить базу` или `Заменить базу` и выберите экспортированный JSON.
+
+В `manifest.json` теперь есть фиксированный `key`, поэтому ID этой unpacked-версии больше не должен меняться при переносе папки. Если история уже была накоплена под старым ID, её всё равно нужно один раз перенести через экспорт/импорт.
 
 ## API локального сервера
 
@@ -114,7 +131,8 @@
 ## Важные технические детали
 
 - Сборка делается через `esbuild`: content scripts собираются в один файл на маркетплейс (`content/ozon.js`, `content/wb.js`, `content/aliexpress.js`) и хранятся в репозитории для `Load unpacked`.
-- `pidKey` формат: `ozon:<id>`, `wb:<id>` или `aliexpress:<id>`.
+- `manifest.key` закрепляет extension ID для unpacked-установки. Не менять его без необходимости, иначе Chrome создаст новое хранилище расширения.
+- `pidKey` формат: `ozon:<id>`, `wb:<id>`, `aliexpress:<id>` или `amazon:<ASIN>`.
 - Последняя батч-сессия хранится в `chrome.storage.local` по ключу `owb-last-extract-session`.
 - При большом батч-результате текст сессии сохраняется с ограничением (защита от переполнения хранилища).
 - Серверная БД: `server/price_history.sqlite` (можно переопределить env-переменной `PRICE_SERVER_DB`).

@@ -2,6 +2,6 @@
 set -eu
 
 echo "Building extension artifacts..."
-npm run build:local
+npm --prefix extension run build:local
 
 git add extension/content/ozon.js extension/content/wb.js extension/content/aliexpress.js

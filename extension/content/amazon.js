@@ -637,7 +637,7 @@
     };
   })();
 
-  // content/exporter/wb.js
+  // content/exporter/amazon.js
   (() => {
     "use strict";
     const MP = window.MP;
@@ -646,10 +646,14 @@
     const {
       sleep,
       slug,
-      wait,
       ensureScrollTopButton,
       downloadTextFile,
-      toBullets
+      toBullets,
+      cleanText,
+      parsePriceValue,
+      detectCurrency,
+      normalizeCurrency,
+      findPriceInCard
     } = MP;
     const {
       attachActionButtons,
@@ -660,338 +664,513 @@
       shouldRestoreFocus: shouldRestoreFocusMaybe = async () => true,
       showExportMark: showExportMarkMaybe = async () => false
     } = Exporter;
-    function initWB() {
-      ensureScrollTopButton({ bottom: 120 });
-      const getWBPriceNode = () => document.querySelector('[class^="priceBlockWalletPrice"], [class*=" priceBlockWalletPrice"]') || document.querySelector('ins[class^="priceBlockFinalPrice"], ins[class*=" priceBlockFinalPrice"]') || document.querySelector('span[class^="priceBlockPrice"], span[class*=" priceBlockPrice"], [class*="priceBlock"] [class*="price"], [class*="orderBlock"] [class*="price"]');
-      async function loadWBReviews(max = 100) {
-        const DELAY = 420;
-        const MAX_IDLE = 6;
-        const target = Math.max(1, Number(max) || 100);
-        let idle = 0;
-        let prev = 0;
-        while (true) {
-          const items = document.querySelectorAll("li.comments__item");
-          if (items.length >= target) break;
-          if (items.length) {
-            items[items.length - 1].scrollIntoView({ block: "end", behavior: "auto" });
-          } else {
-            window.scrollBy(0, 340);
-          }
-          window.scrollBy(0, Math.max(260, Math.round(window.innerHeight * 0.34)));
-          await sleep(DELAY);
-          const now = document.querySelectorAll("li.comments__item").length;
-          if (now === prev) {
-            idle += 1;
-            const loadNode = document.querySelector(".product-feedbacks__load");
-            if (loadNode) {
-              try {
-                loadNode.scrollIntoView({ block: "center", behavior: "auto" });
-              } catch (_) {
-              }
-            }
-            if (idle >= MAX_IDLE) break;
-          } else {
-            prev = now;
-            idle = 0;
-          }
-        }
-        return [...document.querySelectorAll("li.comments__item")].slice(0, target);
+    const clean = cleanText;
+    const AMAZON_ASIN_RE = /^[A-Z0-9]{10}$/;
+    const AMAZON_DEFAULT_MAX_REVIEWS = 100;
+    const AMAZON_ALL_MAX_REVIEWS = 300;
+    const isProductPage = () => /\/(?:dp|gp\/product|exec\/obidos\/ASIN)\/[A-Z0-9]{10}(?:[/?#]|$)/i.test(location.pathname || "") || !!document.querySelector("#dp, #centerCol #title, #ppd #title");
+    const normalizeAsin = (value) => {
+      const raw = String(value || "").trim().toUpperCase();
+      return AMAZON_ASIN_RE.test(raw) ? raw : "";
+    };
+    const getAsinFromHref = (href) => {
+      try {
+        const url = new URL(String(href || ""), location.href);
+        const path = String(url.pathname || "");
+        const m = path.match(/\/(?:dp|gp\/product|exec\/obidos\/ASIN|product-reviews)\/([A-Z0-9]{10})(?:[/?#]|$)/i) || path.match(/\/([A-Z0-9]{10})(?:[/?#]|$)/i);
+        return normalizeAsin(m && m[1]);
+      } catch (_) {
+        return "";
       }
-      const normalizeText = (value) => String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
-      const getReviewVariantTiles = (root) => {
-        if (!root) return [];
-        const scope = root.querySelector('.feedbacksColors--NtFag, [class*="feedbacksColors"], [class*="swiperColors"]') || root;
-        return [...scope.querySelectorAll(".swiper-wrapper > .swiper-slide:not(.swiper-slide-duplicate)")].map((slide) => slide.querySelector(':scope > div[class*="feedbacksColorsItem"]') || slide.querySelector('div[class*="feedbacksColorsItem"]')).filter((tile) => !!tile && !!tile.querySelector('.option--AtxKZ, [class*="option"]'));
-      };
-      const isAllVariantTile = (tile) => {
-        const cls = [...tile?.classList || []].some((c) => /^isAll--/.test(c));
-        const txt = normalizeText(tile?.querySelector('.option--AtxKZ, [class*="option"]')?.textContent || tile?.textContent || "");
-        return cls || txt === "\u0432\u0441\u0435" || txt === "all";
-      };
-      const getTileLabel = (tile) => normalizeText(tile?.querySelector('.option--AtxKZ, [class*="option"]')?.textContent || "");
-      const getReviewColors = (limit = 14) => [...document.querySelectorAll("li.comments__item")].slice(0, limit).map((el) => normalizeText(el.querySelector('.feedback__params-item--color span, [class*="feedbackParamsColor"] span')?.textContent || "")).filter(Boolean);
-      const isReviewsFilteredByLabel = (label) => {
-        const colors = getReviewColors(16);
-        if (colors.length < 4) return false;
-        const uniq = [...new Set(colors)];
-        return uniq.length === 1 && (!label || uniq[0] === label);
-      };
-      const clickVariantTile = async (tile) => {
-        if (!tile) return;
-        const targets = [
-          tile.querySelector('.option--AtxKZ, [class*="option"]'),
-          tile.querySelector("img[src], img[data-src], img[data-src-pb]"),
-          tile.querySelector('button, [role="button"]'),
-          tile,
-          tile.closest(".swiper-slide")
-        ].filter(Boolean);
-        for (const node of targets) {
-          try {
-            node.click();
-          } catch (_) {
-          }
-          await sleep(45);
-        }
-      };
-      const waitForVariantTiles = async (timeoutMs = 3600) => {
-        const started = Date.now();
-        let root = null;
-        let tiles = [];
-        while (Date.now() - started < timeoutMs) {
-          root = document.querySelector('.product-feedbacks__main-wrapper, [class*="product-feedbacks__main"]');
-          tiles = getReviewVariantTiles(root);
-          if (root && tiles.length >= 2) return { root, tiles };
-          await sleep(120);
-        }
-        return { root, tiles };
-      };
-      const switchWBReviewsToFirstSpecificVariant = async () => {
-        const { root, tiles } = await waitForVariantTiles(3800);
-        if (!root) return false;
-        if (tiles.length < 2 || !isAllVariantTile(tiles[0])) return false;
-        const target = tiles[1];
-        const label = getTileLabel(target);
-        if (!label) return false;
-        if (isReviewsFilteredByLabel(label)) return true;
-        const deadline = Date.now() + 3e3;
-        while (Date.now() < deadline) {
-          try {
-            target.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
-          } catch (_) {
-          }
-          await clickVariantTile(target);
-          await sleep(160);
-          const waitStart = Date.now();
-          while (Date.now() - waitStart < 760) {
-            if (isReviewsFilteredByLabel(label)) return true;
-            await sleep(95);
-          }
-        }
-        return isReviewsFilteredByLabel(label);
-      };
-      const getWBPidKey = () => {
-        const path = String(location.pathname || "");
-        const m = path.match(/\/catalog\/(\d{4,})\/detail/i) || path.match(/\/catalog\/(\d{4,})\/feedbacks/i);
-        return m && m[1] ? `wb:${m[1]}` : "";
-      };
-      const restoreCardFocus = async () => {
-        const path = String(location.pathname || "");
-        const isFeedbacks = /\/catalog\/\d{4,}\/feedbacks/i.test(path);
-        if (!isFeedbacks) return;
-        if (window.history.length > 1) {
-          window.history.back();
-          await sleep(280);
-          return;
-        }
-        const detailPath = path.replace(/\/feedbacks(\/|$)/i, "/detail$1");
-        if (detailPath && detailPath !== path) {
-          location.assign(`${location.origin}${detailPath}${location.search || ""}`);
-        }
-      };
-      setRestoreFocus(restoreCardFocus);
-      async function buildWBExportPackage(opts = {}) {
-        const includeReviews = opts.includeReviews !== false;
-        const switchToVariant = opts.switchToVariant !== false;
-        const url = location.href;
-        const header = document.querySelector('[class^="productHeaderWrap"], .product-page__header-wrap') || document;
-        const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
-        const digits = (value) => String(value || "").replace(/[^\d]/g, "");
-        const normalizeBrand = (value) => clean(value).replace(/\s*В каталог бренда.*$/i, "").replace(/^\s*бренд[:\s]*/i, "").trim();
-        const brand = normalizeBrand(
-          header.querySelector('[class*="productHeaderBrandText"]')?.textContent || header.querySelector('a[href*="/brands/"] [class*="typography"]')?.textContent || header.querySelector('a[href*="/brands/"]')?.textContent || document.querySelector('[class*="productHeaderBrandText"]')?.textContent || document.querySelector('[class*="productHeader"] a[href*="/brands/"] [class*="typography"]')?.textContent || document.querySelector('[class*="productHeader"] a[href*="/brands/"]')?.textContent || document.querySelector(".product-page__brand-name")?.textContent || document.querySelector('[class*="categoryLinkBrand"]')?.textContent || "\u2014"
-        );
-        const titleNode = document.querySelector('[class^="productTitle"], [class*=" productTitle"], .product-page__title');
-        const title = clean(titleNode?.innerText || titleNode?.textContent || "\u2014");
-        const shop = clean(
-          document.querySelector('[class*="sellerInfoNameDefaultText"]')?.textContent || document.querySelector('[class*="sellerInfoName"] [class*="typography"]')?.textContent || document.querySelector('[class*="sellerInfo"] a[href*="/seller/"] [class*="typography"]')?.textContent || "\u2014"
-        );
-        const original = document.querySelector('[class^="productHeader"] [class*="original"]') ? "\u0414\u0430" : "\u2014";
-        const ratingText = clean(
-          document.querySelector('[class*="productReviewRating"]')?.textContent || document.querySelector('[class*="ReviewRating"]')?.textContent || document.querySelector('[data-qaid="product-review-rating"]')?.textContent || ""
-        );
-        const rating = ratingText.match(/\b([0-5](?:[.,]\d)?)\b/)?.[1] || clean(document.querySelector('[itemprop="ratingValue"]')?.textContent) || "\u2014";
-        const reviewsTotal = digits(
-          ratingText.match(/(\d[\d\s\u00A0]*)\s*оцен/i)?.[1] || document.querySelector('[class*="ReviewCount"]')?.textContent || document.querySelector('[data-qaid="product-review-count"]')?.textContent || document.querySelector('[itemprop="reviewCount"]')?.textContent || "0"
-        ) || "0";
-        const reviewsLink = document.querySelector(
-          'a[class^="productReview"], a.product-review, #product-feedbacks a.comments__btn-all, #product-feedbacks a.user-opinion__text, a[href*="/feedbacks"]'
-        );
-        const priceNode = getWBPriceNode();
-        let price = "\u2014";
-        if (priceNode) {
-          const raw = priceNode.textContent.replace(/\s+/g, "");
-          price = raw.replace(/([₽€$])/, " $1");
-        }
-        const showBtn = [...document.querySelectorAll("button, a")].find((el) => /характеристик|описани/i.test(el.innerText));
-        if (showBtn) {
-          showBtn.click();
-          await sleep(400);
-        }
-        const popup = [...document.querySelectorAll('[role="dialog"], .popup-product-details, [data-testid="product_additional_information"], section')].find((n) => /Характеристики|описание/i.test(n.innerText || ""));
-        let chars = "\u2014", descr = "\u2014";
-        if (popup) {
-          const rowTexts = [];
-          popup.querySelectorAll("table").forEach((tbl) => {
-            tbl.querySelectorAll("tr").forEach((tr) => {
-              const k = (tr.querySelector('th, [class*="cellDecor"], [class*="cellWrapper"]')?.innerText || "").replace(/[:\s]+$/, "").trim();
-              const v = (tr.querySelector('td, [class*="cellValue"], [data-value]')?.innerText || "").trim();
-              if (k && v && k.toLowerCase() !== v.toLowerCase()) rowTexts.push(`${k}: ${v}`);
-            });
-          });
-          popup.querySelectorAll(".product-params__row").forEach((r) => {
-            const k = (r.querySelector("th")?.innerText || "").replace(/[:\s]+$/, "").trim();
-            const v = (r.querySelector("td")?.innerText || "").trim();
-            if (k && v && k.toLowerCase() !== v.toLowerCase()) rowTexts.push(`${k}: ${v}`);
-          });
-          if (rowTexts.length) chars = rowTexts.join("\n");
-          const descSection = popup.querySelector('#section-description, [id*="section-description"]');
-          const descNode = descSection?.querySelector("p, div") || [...popup.querySelectorAll("h3, h2, h4")].find((h) => /описани/i.test(h.textContent || ""))?.nextElementSibling;
-          if (descNode) descr = descNode.innerText.trim();
-        }
-        const lines = [
-          "=== CARD SUMMARY (WILDBERRIES) ===",
-          `URL: ${url}`,
-          `\u0411\u0440\u0435\u043D\u0434: ${brand}`,
-          `\u041C\u0430\u0433\u0430\u0437\u0438\u043D: ${shop || "\u2014"}`,
-          `\u0417\u0430\u0433\u043E\u043B\u043E\u0432\u043E\u043A: ${title}`,
-          `\u041E\u0440\u0438\u0433\u0438\u043D\u0430\u043B: ${original}`,
-          `\u0426\u0435\u043D\u0430: ${price}`,
-          `\u0420\u0435\u0439\u0442\u0438\u043D\u0433: ${rating} (${reviewsTotal} \u043E\u0446\u0435\u043D\u043E\u043A)`,
-          "",
-          "=== \u041E\u041F\u0418\u0421\u0410\u041D\u0418\u0415 ===",
-          descr,
-          "",
-          "=== \u0425\u0410\u0420\u0410\u041A\u0422\u0415\u0420\u0418\u0421\u0422\u0418\u041A\u0418 ===",
-          ...toBullets(chars)
-        ];
-        const isFeedbacksPage = /\/catalog\/\d{4,}\/feedbacks/i.test(String(location.pathname || ""));
-        const hasFeedbackRoot = !!document.querySelector('.product-feedbacks__main, [class*="product-feedbacks__main"], #product-feedbacks');
-        if (includeReviews && (reviewsLink || isFeedbacksPage || hasFeedbackRoot)) {
-          if (reviewsLink && !isFeedbacksPage) {
-            try {
-              reviewsLink.click();
-            } catch (_) {
-            }
-          }
-          await wait('.product-feedbacks__main, [class*="product-feedbacks__main"], #product-feedbacks', 12e3);
-          await sleep(340);
-          if (switchToVariant) {
-            const switched = await switchWBReviewsToFirstSpecificVariant();
-            if (!switched) {
-              console.warn("[OWB] WB variant switch failed, continue with current reviews scope");
-            } else {
-              await sleep(180);
-            }
-          }
-          const expectedReviews = Math.max(1, Math.min(100, Number(reviewsTotal) || 100));
-          const revs = await loadWBReviews(expectedReviews);
-          const pickBables = (node) => {
-            const res = [];
-            node.querySelectorAll(".feedbacks-bables").forEach((b) => {
-              const title2 = b.querySelector(".feedbacks-bables__title")?.innerText.trim();
-              const vals = [...b.querySelectorAll(".feedbacks-bables__item")].map((li) => li.innerText.trim()).filter(Boolean);
-              if (title2 && vals.length) res.push(`${title2}: ${vals.join(", ")}`);
-            });
-            return res;
-          };
-          lines.push("", "=== \u041E\u0422\u0417\u042B\u0412\u042B ===", `\u041E\u0442\u0437\u044B\u0432\u044B (\u0432\u044B\u0433\u0440\u0443\u0436\u0435\u043D\u043E ${revs.length}):`);
-          if (revs.length) {
-            revs.forEach((el, idx) => {
-              const date = el.querySelector(".feedback__date")?.innerText.trim() || "\u2014";
-              const star = el.querySelector(".feedback__rating");
-              const cls = star && [...star.classList].find((c) => /^star\d+$/.test(c));
-              const rate = cls ? cls.replace("star", "") + "\u2605" : "\u2014";
-              const purchased = el.querySelector(".feedback__state--text")?.innerText.trim() || "\u2014";
-              const parts = [`${rate}, ${purchased}`];
-              const pros = el.querySelector(".feedback__text--item-pro")?.innerText.replace(/^Достоинства:/, "").trim();
-              if (pros) parts.push(`\u0414\u043E\u0441\u0442\u043E\u0438\u043D\u0441\u0442\u0432\u0430: ${pros}`);
-              const cons = el.querySelector(".feedback__text--item-con")?.innerText.replace(/^Недостатки:/, "").trim();
-              if (cons) parts.push(`\u041D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043A\u0438: ${cons}`);
-              const free = [...el.querySelectorAll(".feedback__text--item")].find((n) => !n.classList.contains("feedback__text--item-pro") && !n.classList.contains("feedback__text--item-con"))?.innerText.replace(/^Комментарий:/, "").trim();
-              if (free) parts.push(`\u041A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439: ${free}`);
-              pickBables(el).forEach((t) => parts.push(t));
-              lines.push(`- \u041E\u0442\u0437\u044B\u0432 ${idx + 1} (${date}): ${parts.join("; ")}`);
-            });
-          } else lines.push("\u041D\u0435\u0442 \u043E\u0442\u0437\u044B\u0432\u043E\u0432");
-        }
-        const txt = lines.join("\n");
-        const filenameBase = brand && brand !== "\u2014" ? `${title} ${brand}` : title;
-        const fname = slug(filenameBase) + ".txt";
-        return {
-          market: "wb",
-          pidKey: getWBPidKey(),
-          url,
-          title,
-          filename: fname,
-          text: txt
-        };
+    };
+    const getAsin = () => {
+      const fromUrl = getAsinFromHref(location.href);
+      if (fromUrl) return fromUrl;
+      const selectors = [
+        'input[name="asin"]',
+        "input#ASIN",
+        "input#asin",
+        "#averageCustomerReviews[data-asin]",
+        "[data-csa-c-asin]",
+        "[data-asin]"
+      ];
+      for (const selector of selectors) {
+        const node = document.querySelector(selector);
+        const value = node?.value || node?.getAttribute?.("data-asin") || node?.getAttribute?.("data-csa-c-asin") || "";
+        const asin = normalizeAsin(value);
+        if (asin) return asin;
       }
-      async function exportWB(opts = {}) {
-        try {
-          const copyOnly = !!opts.copyOnly;
-          const pack = await buildWBExportPackage(opts);
-          if (copyOnly) {
-            await copyToClipboard(pack.text);
-            await saveLastExtractSessionFromItem(pack, {
-              mode: "copy",
-              allReviews: opts.includeReviews !== false
-            });
-            try {
-              await showExportMarkMaybe({ mode: "copy", scope: "single", market: "wb" });
-            } catch (_) {
-            }
-            let shouldRestore2 = true;
-            try {
-              shouldRestore2 = await shouldRestoreFocusMaybe("single");
-            } catch (_) {
-              shouldRestore2 = true;
-            }
-            if (shouldRestore2) {
-              await restoreCardFocus({ mode: "copy", scope: "single", market: "wb" });
-            }
-            return;
-          }
-          downloadTextFile(pack.filename, pack.text);
-          await saveLastExtractSessionFromItem(pack, {
-            mode: "download",
-            allReviews: opts.includeReviews !== false
-          });
-          try {
-            await showExportMarkMaybe({ mode: "download", scope: "single", market: "wb" });
-          } catch (_) {
-          }
-          let shouldRestore = true;
-          try {
-            shouldRestore = await shouldRestoreFocusMaybe("single");
-          } catch (_) {
-            shouldRestore = true;
-          }
-          if (shouldRestore) {
-            await restoreCardFocus({ mode: "download", scope: "single", market: "wb" });
-          }
-        } catch (err) {
-          console.error("WB exporter:", err);
-          throw err;
+      const canonical = document.querySelector('link[rel="canonical"]')?.href || "";
+      return getAsinFromHref(canonical);
+    };
+    const getPidKey = () => {
+      const asin = getAsin();
+      return asin ? `amazon:${asin}` : "";
+    };
+    const getCanonicalUrl = (asin = getAsin()) => asin ? `${location.origin}/dp/${asin}` : location.href;
+    const isAmazonReviewsRoute = () => /\/(?:product-reviews|portal\/customer-reviews)\/[A-Z0-9]{10}(?:[/?#]|$)/i.test(location.pathname || "");
+    const buildAmazonReviewsUrl = (asin = getAsin(), page = 1) => {
+      if (!asin) return "";
+      const url = new URL(`/product-reviews/${asin}`, location.origin);
+      url.searchParams.set("reviewerType", "all_reviews");
+      url.searchParams.set("sortBy", "recent");
+      url.searchParams.set("pageNumber", String(Math.max(1, Number(page) || 1)));
+      return url.href;
+    };
+    const getTitleNode = () => document.querySelector("#title #productTitle, h1#title span#productTitle, h1#title, #productTitle");
+    const getTitle = () => clean(getTitleNode()?.textContent || document.querySelector('input[name="productTitle"]')?.value || document.title || "\u2014");
+    const getBrand = () => {
+      const byline = clean(document.querySelector("#bylineInfo")?.textContent || "");
+      const fromByline = byline.replace(/^visit\s+the\s+/i, "").replace(/\s+store$/i, "").replace(/^brand:\s*/i, "").trim();
+      if (fromByline) return fromByline;
+      const row = [...document.querySelectorAll("#productDetails_feature_div tr, #prodDetails tr")].find((tr) => /^brand$/i.test(clean(tr.querySelector("th")?.textContent || "")));
+      return clean(row?.querySelector("td")?.textContent || "\u2014");
+    };
+    const isOldPriceNode = (node) => !!(node && (node.closest('.a-text-price, [data-a-strike="true"], del') || /line-through/i.test(node.closest("[style]")?.getAttribute("style") || "")));
+    const parsePriceNode = (node) => {
+      if (!node) return null;
+      const text = clean(node.getAttribute?.("aria-label") || node.textContent || "");
+      const price = parsePriceValue(text);
+      if (!Number.isFinite(price)) return null;
+      return { price, currency: normalizeCurrency(detectCurrency(text) || "$"), text };
+    };
+    const getPriceRoot = () => document.querySelector("#corePriceDisplay_desktop_feature_div") || document.querySelector("#corePrice_feature_div") || document.querySelector("#apex_desktop") || document.querySelector("#buybox") || document.querySelector("#centerCol") || null;
+    const getPagePrice = () => {
+      const hiddenValue = document.querySelector('input#priceValue, input[name="priceValue"]')?.value;
+      const hiddenPrice = Number(String(hiddenValue || "").replace(",", "."));
+      if (Number.isFinite(hiddenPrice) && hiddenPrice > 0) {
+        const symbol = document.querySelector('input#priceSymbol, input[name="priceSymbol"]')?.value || "$";
+        const currency = normalizeCurrency(symbol || document.querySelector("input#currencyOfPreference")?.value || "USD") || "$";
+        return { price: hiddenPrice, currency, text: `${symbol}${hiddenValue}` };
+      }
+      const root = getPriceRoot();
+      const preferred = [
+        "#corePriceDisplay_desktop_feature_div .priceToPay .a-offscreen",
+        '#corePriceDisplay_desktop_feature_div [data-a-color="price"] .a-offscreen',
+        "#corePriceDisplay_desktop_feature_div .a-price:not(.a-text-price) .a-offscreen",
+        "#corePrice_feature_div .a-price:not(.a-text-price) .a-offscreen",
+        "#apex_desktop .a-price:not(.a-text-price) .a-offscreen",
+        "#buybox .a-price:not(.a-text-price) .a-offscreen"
+      ];
+      for (const selector of preferred) {
+        const nodes = [...document.querySelectorAll(selector)].filter((node) => !isOldPriceNode(node));
+        for (const node of nodes) {
+          const parsed = parsePriceNode(node);
+          if (parsed) return parsed;
         }
       }
-      setRunExport(async (opts = {}) => {
-        const allReviews = opts.allReviews === true;
-        return buildWBExportPackage({
-          includeReviews: opts.includeReviews !== false,
-          switchToVariant: allReviews ? false : true
-        });
+      const info = findPriceInCard(root || document.body, { defaultCurrency: "$" });
+      return info && Number.isFinite(Number(info.price)) ? { price: Number(info.price), currency: info.currency || "$", text: root?.textContent || "" } : null;
+    };
+    const formatPrice = (info) => {
+      if (!info || !Number.isFinite(Number(info.price))) return "\u2014";
+      return `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 }).format(Number(info.price))} ${info.currency || "$"}`;
+    };
+    const parseCount = (value) => {
+      const compact = clean(value).match(/(\d+(?:[.,]\d+)?)\s*([km])\b/i);
+      if (compact) {
+        const n = Number(compact[1].replace(",", "."));
+        return Number.isFinite(n) ? Math.round(n * (/m/i.test(compact[2]) ? 1e6 : 1e3)) : 0;
+      }
+      const digits = clean(value).replace(/[^\d]/g, "");
+      return digits ? Number(digits) || 0 : 0;
+    };
+    const getRatingInfo = () => {
+      const ratingText = clean(
+        document.querySelector("#acrPopover")?.getAttribute("title") || document.querySelector("#acrPopover .a-icon-alt")?.textContent || document.querySelector('[data-hook="rating-out-of-text"]')?.textContent || ""
+      );
+      const rating = (ratingText.replace(",", ".").match(/\b([0-5](?:\.\d)?)\b/) || [])[1] || "\u2014";
+      const reviewsText = clean(
+        document.querySelector("#acrCustomerReviewText")?.getAttribute("aria-label") || document.querySelector("#acrCustomerReviewText")?.textContent || ""
+      );
+      return {
+        rating,
+        reviews: parseCount(reviewsText)
+      };
+    };
+    const getSeller = () => {
+      const seller = clean(
+        document.querySelector("#sellerProfileTriggerId")?.textContent || document.querySelector("#merchant-info a")?.textContent || ""
+      );
+      if (seller) return seller;
+      const merchant = clean(document.querySelector("#merchant-info")?.textContent || "");
+      const m = merchant.match(/sold by\s+(.+?)(?:\sand\s+fulfilled|\.)/i);
+      return clean(m && m[1] || merchant || "\u2014");
+    };
+    const getAvailability = () => clean(document.querySelector("#availability")?.textContent || document.querySelector("#outOfStock")?.textContent || "\u2014");
+    const collectBullets = () => [...document.querySelectorAll("#feature-bullets li .a-list-item")].map((node) => clean(node.textContent || "")).filter((text) => text && !/^make sure this fits/i.test(text));
+    const collectSpecs = () => {
+      const rows = [];
+      const seen = /* @__PURE__ */ new Set();
+      const add = (key, value) => {
+        const k = clean(key).replace(/[:\s]+$/, "");
+        const v = clean(value);
+        if (!k || !v || k === v) return;
+        if (/^(customer reviews|best sellers rank)$/i.test(k)) return;
+        const row = `${k}: ${v}`;
+        const sig = row.toLowerCase();
+        if (seen.has(sig)) return;
+        seen.add(sig);
+        rows.push(row);
+      };
+      document.querySelectorAll("#productOverview_feature_div tr, #productDetails_feature_div tr, #prodDetails tr, table#productDetails_detailBullets_sections1 tr").forEach((tr) => {
+        add(tr.querySelector("th, .a-span3")?.textContent, tr.querySelector("td, .a-span9")?.textContent);
       });
-      const wbTitleSelector = '[class^="productTitle"], [class*=" productTitle"], .product-page__title';
+      document.querySelectorAll("#detailBullets_feature_div li").forEach((li) => {
+        const bold = li.querySelector(".a-text-bold");
+        if (!bold) return;
+        const key = clean(bold.textContent).replace(/^[\s:]+|[\s:]+$/g, "");
+        const clone = li.cloneNode(true);
+        clone.querySelectorAll(".a-text-bold, script, style").forEach((node) => node.remove());
+        add(key, clone.textContent);
+      });
+      return rows.length ? rows.join("\n") : "\u2014";
+    };
+    const collectVariations = () => {
+      const rows = [];
+      document.querySelectorAll('[id^="variation_"]').forEach((root) => {
+        const label = clean(root.querySelector(".a-form-label")?.textContent || root.id.replace(/^variation_/, ""));
+        const selected = clean(root.querySelector(".selection")?.textContent || root.querySelector('[aria-checked="true"]')?.textContent || "");
+        if (label && selected) rows.push(`${label.replace(/[:\s]+$/, "")}: ${selected}`);
+      });
+      return rows.length ? rows.join("\n") : "\u2014";
+    };
+    const collectDescription = () => {
+      const direct = clean(document.querySelector("#productDescription")?.textContent || "");
+      if (direct) return direct;
+      const aplus = document.querySelector("#aplus, #aplus_feature_div");
+      if (!aplus) return "\u2014";
+      const clone = aplus.cloneNode(true);
+      clone.querySelectorAll("script, style, noscript, svg, button, img").forEach((node) => node.remove());
+      const lines = clean(clone.innerText || clone.textContent || "").split(/\n+/).map((line) => clean(line)).filter(Boolean);
+      return lines.length ? lines.slice(0, 80).join("\n") : "\u2014";
+    };
+    const getMainImage = () => {
+      const img = document.querySelector("#landingImage, #imgTagWrapperId img, #main-image-container img");
+      return clean(img?.currentSrc || img?.src || img?.getAttribute?.("data-old-hires") || "");
+    };
+    const requestAmazonReviewsInTempTab = async (reviewsUrl, options = {}) => {
+      if (!reviewsUrl || !(globalThis.chrome && chrome.runtime && typeof chrome.runtime.sendMessage === "function")) {
+        return null;
+      }
+      return new Promise((resolve) => {
+        try {
+          chrome.runtime.sendMessage({
+            type: "owb:amazon-collect-reviews",
+            payload: {
+              url: reviewsUrl,
+              maxReviews: options.maxReviews || AMAZON_DEFAULT_MAX_REVIEWS
+            }
+          }, (response) => {
+            if (chrome.runtime.lastError || !response || !response.ok) {
+              resolve(null);
+              return;
+            }
+            resolve(response.data || null);
+          });
+        } catch (_) {
+          resolve(null);
+        }
+      });
+    };
+    const textFromNode = (node) => {
+      if (!node) return "";
+      const clone = node.cloneNode(true);
+      clone.querySelectorAll("script, style, noscript, svg, button").forEach((n) => n.remove());
+      return clean(clone.innerText || clone.textContent || "");
+    };
+    const readReviewsStatePage = (node) => {
+      try {
+        const raw = node?.getAttribute?.("data-reviews-state-param") || "";
+        if (!raw) return 0;
+        const data = JSON.parse(raw.replace(/&quot;/g, '"'));
+        const n = Number(data.pageNumber);
+        return Number.isFinite(n) ? n : 0;
+      } catch (_) {
+        return 0;
+      }
+    };
+    const isVisibleNode = (node) => {
+      if (!node || !node.isConnected) return false;
+      if (node.closest("[hidden], .aok-hidden, .a-hidden, .a-button-disabled")) return false;
+      if (node.getAttribute("aria-disabled") === "true") return false;
+      const rect = node.getBoundingClientRect?.();
+      return !rect || rect.width > 0 || rect.height > 0;
+    };
+    const clickAmazonNode = (node) => {
+      if (!node) return false;
+      try {
+        if (typeof node.click === "function") node.click();
+        return true;
+      } catch (_) {
+        try {
+          node.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+          node.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+          node.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+          return true;
+        } catch (_2) {
+          return false;
+        }
+      }
+    };
+    const getAmazonReviewBody = (node) => {
+      const body = node.querySelector('[data-hook="review-body"], .review-text');
+      const full = body?.querySelector?.('.cr-original-review-content, .a-expander-content, [data-expanded="true"]') || node.querySelector('.cr-original-review-content, [data-hook="review-body"] .a-expander-content');
+      return (textFromNode(full) || textFromNode(body) || "\u0411\u0435\u0437 \u0442\u0435\u043A\u0441\u0442\u0430").replace(/\s*(Read more|Show less)\s*$/i, "").trim();
+    };
+    const parseAmazonReviewNode = (node, idx) => {
+      const ratingText = clean(
+        node.querySelector('[data-hook="review-star-rating"] .a-icon-alt, [data-hook="cmps-review-star-rating"] .a-icon-alt, .review-rating .a-icon-alt')?.textContent || ""
+      );
+      const rating = (ratingText.replace(",", ".").match(/\b([1-5](?:\.\d)?)\b/) || [])[1] || "\u2014";
+      const title = textFromNode(node.querySelector('[data-hook="review-title"], .review-title'));
+      const date = clean(node.querySelector('[data-hook="review-date"], .review-date')?.textContent || "");
+      const author = clean(node.querySelector(".a-profile-name")?.textContent || "");
+      const variant = textFromNode(node.querySelector('[data-hook="format-strip"]'));
+      const verified = clean(node.querySelector('[data-hook="avp-badge"]')?.textContent || "");
+      const body = getAmazonReviewBody(node);
+      const imageCount = node.querySelectorAll('[data-hook="review-image-tile"], .review-image-tile, img.review-image-tile').length;
+      const parts = [];
+      if (rating !== "\u2014") parts.push(`${rating}\u2605`);
+      if (author) parts.push(`\u0410\u0432\u0442\u043E\u0440: ${author}`);
+      if (title) parts.push(`\u0417\u0430\u0433\u043E\u043B\u043E\u0432\u043E\u043A: ${title}`);
+      if (variant) parts.push(variant);
+      if (verified) parts.push(verified);
+      parts.push(`\u041A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439: ${body}`);
+      if (imageCount) parts.push(`\u0424\u043E\u0442\u043E: ${imageCount}`);
+      return `\u041E\u0442\u0437\u044B\u0432 ${idx + 1} (${date || "\u2014"}): ${parts.join("; ")}`;
+    };
+    const getAmazonReviewNodes = (root = document) => {
+      const nodes = [...root.querySelectorAll('[data-hook="review"], .review[data-hook], div[id^="customer_review-"]')];
+      return nodes.filter((node) => !nodes.some((other) => other !== node && other.contains(node)));
+    };
+    const collectAmazonReviewsFromDocument = (doc, offset = 0, seen = /* @__PURE__ */ new Set()) => {
+      const nodes = getAmazonReviewNodes(doc);
+      const items = [];
+      nodes.forEach((node) => {
+        const id = node.getAttribute("id") || node.getAttribute("data-review-id") || textFromNode(node).slice(0, 120);
+        if (!id || seen.has(id)) return;
+        seen.add(id);
+        items.push(parseAmazonReviewNode(node, offset + items.length));
+      });
+      return items;
+    };
+    const getAmazonShowMoreButton = (root = document) => {
+      const buttons = [
+        ...root.querySelectorAll(
+          '[data-hook="show-more-button"], .cm-cr-show-more a, #cm_cr-pagination_bar a, a[data-reftag^="cm_cr_arp_d_paging_btm"]'
+        )
+      ].filter((node) => !node.matches?.("select, option") && (root !== document || isVisibleNode(node)));
+      const candidates = buttons.filter((node) => /show\s+\d+\s+more\s+reviews|show\s+more\s+reviews/i.test(clean(node.textContent || "")) || readReviewsStatePage(node) > 0).sort((a, b) => readReviewsStatePage(b) - readReviewsStatePage(a));
+      return candidates[0] || buttons[buttons.length - 1] || null;
+    };
+    const expandAmazonReviewBodies = async (root = document) => {
+      const buttons = getAmazonReviewNodes(root).flatMap((node) => [
+        ...node.querySelectorAll(
+          'a[data-action="a-expander-toggle"][aria-expanded="false"], .a-expander-header[aria-expanded="false"], [data-hook="review-body"] .a-expander-header, .review-text .a-expander-header'
+        )
+      ]).filter((node) => isVisibleNode(node));
+      for (const button of buttons.slice(0, 300)) {
+        button.scrollIntoView({ block: "center", inline: "nearest" });
+        await sleep(60);
+        clickAmazonNode(button);
+      }
+      if (buttons.length) await sleep(300);
+    };
+    const waitForAmazonReviewsCount = async (previousCount, timeoutMs = 15e3) => {
+      const started = Date.now();
+      while (Date.now() - started < timeoutMs) {
+        const count = getAmazonReviewNodes().length;
+        if (count > previousCount) return count;
+        await sleep(250);
+      }
+      return getAmazonReviewNodes().length;
+    };
+    const loadAmazonReviewsByClicking = async (limit) => {
+      if (!isAmazonReviewsRoute()) return false;
+      let stagnantRounds = 0;
+      while (getAmazonReviewNodes().length < limit) {
+        const before = getAmazonReviewNodes().length;
+        const button = getAmazonShowMoreButton();
+        if (!button) break;
+        try {
+          button.scrollIntoView({ block: "center", inline: "nearest" });
+          window.scrollBy(0, Math.round(window.innerHeight * 0.35));
+          await sleep(250);
+          if (!clickAmazonNode(button)) break;
+        } catch (_) {
+          break;
+        }
+        const after = await waitForAmazonReviewsCount(before);
+        if (after <= before) {
+          stagnantRounds += 1;
+          if (stagnantRounds >= 2) break;
+        } else {
+          stagnantRounds = 0;
+        }
+        await sleep(220);
+      }
+      await expandAmazonReviewBodies(document);
+      return true;
+    };
+    const collectAmazonReviewsFromPages = async (maxReviews = AMAZON_DEFAULT_MAX_REVIEWS, asin = getAsin()) => {
+      const limit = Math.max(1, Math.min(Number(maxReviews) || AMAZON_DEFAULT_MAX_REVIEWS, 300));
+      const seen = /* @__PURE__ */ new Set();
+      const items = [];
+      if (isAmazonReviewsRoute()) {
+        await loadAmazonReviewsByClicking(limit);
+        items.push(...collectAmazonReviewsFromDocument(document, 0, seen));
+      }
+      const parser = new DOMParser();
+      for (let page = 1; items.length < limit && page <= 30; page += 1) {
+        const url = buildAmazonReviewsUrl(asin, page);
+        if (!url) break;
+        try {
+          const response = await fetch(url, { credentials: "include" });
+          if (!response.ok) break;
+          const html = await response.text();
+          const doc = parser.parseFromString(html, "text/html");
+          const before = items.length;
+          items.push(...collectAmazonReviewsFromDocument(doc, items.length, seen));
+          const hasNext = !!(doc.querySelector("li.a-last a, .a-pagination .a-last a") || getAmazonShowMoreButton(doc));
+          if (items.length === before || !hasNext) break;
+        } catch (_) {
+          break;
+        }
+        await sleep(180);
+      }
+      return {
+        header: `\u041E\u0442\u0437\u044B\u0432\u044B (\u0432\u044B\u0433\u0440\u0443\u0436\u0435\u043D\u043E ${Math.min(items.length, limit)})`,
+        items: items.slice(0, limit),
+        unavailable: !items.length
+      };
+    };
+    const collectAmazonReviewsForProduct = async (maxReviews = AMAZON_DEFAULT_MAX_REVIEWS) => {
+      const asin = getAsin();
+      if (!asin) return { header: "\u041E\u0442\u0437\u044B\u0432\u044B: ASIN \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D", items: [], unavailable: true };
+      if (!isAmazonReviewsRoute()) {
+        const fromTempTab = await requestAmazonReviewsInTempTab(buildAmazonReviewsUrl(asin, 1), { maxReviews });
+        if (fromTempTab && Array.isArray(fromTempTab.items)) return fromTempTab;
+      }
+      return collectAmazonReviewsFromPages(maxReviews, asin);
+    };
+    const buildAmazonExportPackage = async (opts = {}) => {
+      const includeReviews = opts.includeReviews !== false;
+      const maxReviews = opts.allReviews === true ? Number(opts.maxReviews) || AMAZON_ALL_MAX_REVIEWS : Number(opts.maxReviews) || AMAZON_DEFAULT_MAX_REVIEWS;
+      const asin = getAsin();
+      const url = getCanonicalUrl(asin);
+      const title = getTitle();
+      const brand = getBrand();
+      const rating = getRatingInfo();
+      const priceInfo = getPagePrice();
+      const bullets = collectBullets();
+      const variations = collectVariations();
+      const specs = collectSpecs();
+      const description = collectDescription();
+      const image = getMainImage();
+      const lines = [
+        "=== CARD SUMMARY (AMAZON) ===",
+        `URL: ${url}`,
+        `ASIN: ${asin || "\u2014"}`,
+        `\u0411\u0440\u0435\u043D\u0434/\u043C\u0430\u0433\u0430\u0437\u0438\u043D: ${brand || "\u2014"}`,
+        `\u041F\u0440\u043E\u0434\u0430\u0432\u0435\u0446: ${getSeller()}`,
+        `\u0417\u0430\u0433\u043E\u043B\u043E\u0432\u043E\u043A: ${title}`,
+        `\u0426\u0435\u043D\u0430: ${formatPrice(priceInfo)}`,
+        `\u041D\u0430\u043B\u0438\u0447\u0438\u0435: ${getAvailability()}`,
+        `\u0420\u0435\u0439\u0442\u0438\u043D\u0433: ${rating.rating} (${rating.reviews} \u043E\u0442\u0437\u044B\u0432\u043E\u0432)`,
+        image ? `\u0418\u0437\u043E\u0431\u0440\u0430\u0436\u0435\u043D\u0438\u0435: ${image}` : "",
+        "",
+        "=== \u0412\u0410\u0420\u0418\u0410\u041D\u0422 ===",
+        variations,
+        "",
+        "=== \u041E\u041F\u0418\u0421\u0410\u041D\u0418\u0415 / \u0411\u0423\u041B\u041B\u0415\u0422\u042B ===",
+        ...bullets.length ? bullets.map((item) => `- ${item}`) : ["\u2014"],
+        "",
+        "=== \u0425\u0410\u0420\u0410\u041A\u0422\u0415\u0420\u0418\u0421\u0422\u0418\u041A\u0418 ===",
+        ...toBullets(specs),
+        "",
+        "=== PRODUCT DESCRIPTION ===",
+        description
+      ].filter((line) => line !== "");
+      if (includeReviews) {
+        const reviews = await collectAmazonReviewsForProduct(maxReviews);
+        lines.push("", "=== \u041E\u0422\u0417\u042B\u0412\u042B ===", reviews.header);
+        if (reviews.items.length) {
+          lines.push(...reviews.items.map((item) => `- ${item}`));
+        } else if (reviews.unavailable) {
+          lines.push("\u041E\u0442\u0437\u044B\u0432\u044B \u043D\u0435 \u0432\u044B\u0433\u0440\u0443\u0436\u0435\u043D\u044B");
+        } else {
+          lines.push("\u041D\u0435\u0442 \u043E\u0442\u0437\u044B\u0432\u043E\u0432");
+        }
+      }
+      const text = lines.join("\n");
+      return {
+        market: "amazon",
+        pidKey: asin ? `amazon:${asin}` : "",
+        url,
+        title,
+        filename: `${slug(title || asin || "amazon")}.txt`,
+        text
+      };
+    };
+    const restoreCardFocus = async () => {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      await sleep(220);
+    };
+    const exportAmazon = async (opts = {}) => {
+      const includeReviews = opts.includeReviews !== false;
+      const pack = await buildAmazonExportPackage(opts);
+      if (opts.copyOnly) {
+        await copyToClipboard(pack.text);
+        await saveLastExtractSessionFromItem(pack, { mode: "copy", allReviews: includeReviews });
+        try {
+          await showExportMarkMaybe({ mode: "copy", scope: "single", market: "amazon" });
+        } catch (_) {
+        }
+      } else {
+        downloadTextFile(pack.filename, pack.text);
+        await saveLastExtractSessionFromItem(pack, { mode: "download", allReviews: includeReviews });
+        try {
+          await showExportMarkMaybe({ mode: "download", scope: "single", market: "amazon" });
+        } catch (_) {
+        }
+      }
+      let shouldRestore = true;
+      try {
+        shouldRestore = await shouldRestoreFocusMaybe("single");
+      } catch (_) {
+        shouldRestore = true;
+      }
+      if (shouldRestore) await restoreCardFocus();
+    };
+    function initAmazon() {
+      ensureScrollTopButton();
+      setRestoreFocus(restoreCardFocus);
+      setRunExport((options = {}) => buildAmazonExportPackage(options));
+      if (globalThis.chrome && chrome.runtime && chrome.runtime.onMessage) {
+        chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+          if (!message || message.scope !== "owb-amazon-reviews") return void 0;
+          if (String(message.action || "") !== "collect-reviews") return void 0;
+          (async () => {
+            if (!isAmazonReviewsRoute()) throw new Error("Current page is not Amazon reviews route");
+            return collectAmazonReviewsFromPages(Number(message.payload?.maxReviews) || AMAZON_DEFAULT_MAX_REVIEWS);
+          })().then((data) => sendResponse({ ok: true, data })).catch((err) => {
+            sendResponse({ ok: false, error: String(err && err.message ? err.message : err) });
+          });
+          return true;
+        });
+      }
       setInterval(() => {
-        attachActionButtons(document.querySelector(wbTitleSelector), "wb", [
-          { label: "\u0421\u043A\u0430\u0447\u0430\u0442\u044C", kind: "full", run: () => exportWB({ includeReviews: true, switchToVariant: true }) },
-          { label: "\u0432\u0441\u0435 \u043E\u0442\u0437\u044B\u0432\u044B", kind: "all", run: () => exportWB({ includeReviews: true, switchToVariant: false }) },
-          { label: "\u0432 \u0431\u0443\u0444\u0435\u0440", kind: "copy", pendingText: "\u041A\u043E\u043F\u0438\u0440\u0443\u044E...", successText: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E", toastSuccess: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E \u0432 \u0431\u0443\u0444\u0435\u0440", run: () => exportWB({ includeReviews: false, copyOnly: true }) },
-          { label: "\u0432 \u0431\u0443\u0444\u0435\u0440 \u0441 \u043E\u0442\u0437\u044B\u0432\u0430\u043C\u0438", kind: "copy_all", pendingText: "\u041A\u043E\u043F\u0438\u0440\u0443\u044E...", successText: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E", toastSuccess: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E \u0432 \u0431\u0443\u0444\u0435\u0440", run: () => exportWB({ includeReviews: true, switchToVariant: true, copyOnly: true }) }
+        if (!isProductPage()) return;
+        attachActionButtons(getTitleNode(), "amazon", [
+          { label: "\u0421\u043A\u0430\u0447\u0430\u0442\u044C", kind: "full", run: () => exportAmazon({ copyOnly: false }) },
+          { label: "\u0432 \u0431\u0443\u0444\u0435\u0440", kind: "copy", pendingText: "\u041A\u043E\u043F\u0438\u0440\u0443\u044E...", successText: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E", toastSuccess: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E \u0432 \u0431\u0443\u0444\u0435\u0440", run: () => exportAmazon({ copyOnly: true }) },
+          { label: "\u0432\u0441\u0435 \u043E\u0442\u0437\u044B\u0432\u044B", kind: "full", run: () => exportAmazon({ copyOnly: false, includeReviews: true, allReviews: true }) },
+          { label: "\u043E\u0442\u0437\u044B\u0432\u044B \u0432 \u0431\u0443\u0444\u0435\u0440", kind: "copy", pendingText: "\u041A\u043E\u043F\u0438\u0440\u0443\u044E...", successText: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E", toastSuccess: "\u041E\u0442\u0437\u044B\u0432\u044B \u0441\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u044B", run: () => exportAmazon({ copyOnly: true, includeReviews: true, allReviews: true }) }
         ]);
       }, 1e3);
     }
-    initWB();
+    initAmazon();
   })();
 
   // content/price-monitor/common.js
@@ -1586,7 +1765,7 @@
     };
   })();
 
-  // content/price-monitor/wb.js
+  // content/price-monitor/amazon.js
   (() => {
     "use strict";
     const PM = window.OWBPriceMonitor;
@@ -1596,146 +1775,186 @@
       startCardScanner,
       collectGroupsFromCards,
       setCurrentProductDetector,
+      cleanText,
       parsePriceValue,
       detectCurrency,
-      extractDigits,
-      findArticleByLabel,
-      findBlockAnchor,
+      normalizeCurrency,
       findPriceInCard
     } = PM;
-    const getPriceNode = () => document.querySelector('[class^="priceBlockWalletPrice"], [class*=" priceBlockWalletPrice"]') || document.querySelector('ins[class^="priceBlockFinalPrice"], ins[class*=" priceBlockFinalPrice"]') || document.querySelector('span[class^="priceBlockPrice"], span[class*=" priceBlockPrice"], [class*="priceBlock"] [class*="price"], [class*="orderBlock"] [class*="price"]');
-    const getPagePrice = () => {
-      const node = getPriceNode();
-      if (!node) return null;
-      const text = node.textContent || "";
-      const info = findPriceInCard(node.closest("section,article,div") || node.parentElement || node, { defaultCurrency: "\u20BD" });
-      if (info && Number.isFinite(Number(info.price))) return { price: Number(info.price), currency: info.currency || "\u20BD", text };
-      const parsed = parsePriceValue(text);
-      return Number.isFinite(parsed) ? { price: parsed, currency: detectCurrency(text) || "\u20BD", text } : null;
+    const clean = cleanText;
+    const AMAZON_ASIN_RE = /^[A-Z0-9]{10}$/;
+    const normalizeAsin = (value) => {
+      const raw = String(value || "").trim().toUpperCase();
+      return AMAZON_ASIN_RE.test(raw) ? raw : "";
     };
-    function initWB() {
-      const parseBasketPriceText = (text) => {
-        const raw = String(text || "").replace(/[\u00A0\u202F]/g, " ").replace(/\s+/g, " ").trim();
-        if (!raw) return null;
-        const lowered = raw.toLowerCase();
-        if (/(?:\/|за)\s*\d*[.,]?\d*\s*(шт|шту|уп|упак|пак|г|гр|кг|мл|л)\b/.test(lowered)) return null;
-        if (/(шт|шту|уп|упак|пак|г|гр|кг|мл|л)\b/.test(lowered) && /(?:\/|за|x|×)/.test(lowered)) return null;
-        const numberGroups = raw.match(/\d[\d\s.,]*/g) || [];
-        if (numberGroups.length > 1) return null;
-        const price = parsePriceValue(raw);
-        return Number.isFinite(price) ? { price, currency: detectCurrency(raw) || "\u20BD", text: raw } : null;
-      };
-      const getPid = () => {
-        const fromUrl = location.pathname.match(/\/catalog\/(\d{4,})\/detail/i);
-        if (fromUrl) return fromUrl[1];
-        const nmId = document.querySelector("[data-nm-id]")?.getAttribute("data-nm-id");
-        if (nmId) return nmId;
-        const sku = document.querySelector('meta[itemprop="sku"], meta[name="item_id"]')?.getAttribute("content") || "";
-        const digits = extractDigits(sku);
-        if (digits) return digits;
-        return findArticleByLabel(document.body);
-      };
-      const getAnchor = () => {
-        const node = getPriceNode();
-        if (!node) return null;
-        let candidate = null;
-        let cur = node;
-        while (cur && cur !== document.body) {
-          if (cur.tagName === "DIV" || cur.tagName === "SECTION" || cur.tagName === "ARTICLE") {
-            const cls = String(cur.className || "");
-            if (/priceBlock/i.test(cls)) {
-              if (!/priceBlockPrice/i.test(cls)) candidate = cur;
-              else if (!candidate) candidate = cur;
-            } else if (/productPrice/i.test(cls)) {
-              candidate = cur;
-            }
-          }
-          cur = cur.parentElement;
+    const getAsinFromHref = (href) => {
+      try {
+        const url = new URL(String(href || ""), location.href);
+        const path = String(url.pathname || "");
+        const m = path.match(/\/(?:dp|gp\/product|exec\/obidos\/ASIN)\/([A-Z0-9]{10})(?:[/?#]|$)/i) || path.match(/\/([A-Z0-9]{10})(?:[/?#]|$)/i);
+        const fromPath = normalizeAsin(m && m[1]);
+        if (fromPath) return fromPath;
+        for (const key of ["pd_rd_i", "asin", "ASIN"]) {
+          const fromQuery = normalizeAsin(url.searchParams.get(key));
+          if (fromQuery) return fromQuery;
         }
-        return candidate || findBlockAnchor(node, /priceBlock|productPrice|productSummary|priceBlockContent|orderBlock|buybox|basket/i) || node.parentElement || node;
-      };
-      const isProductPage = () => /\/catalog\/\d{4,}\/detail/i.test(location.pathname || "");
-      startProductTracker({ market: "wb", getPid, getPrice: getPagePrice, getAnchor, isProductPage });
-      const getCardPid = (card) => {
-        if (!card) return "";
-        const direct = card.getAttribute("data-nm-id") || card.getAttribute("data-popup-nm-id") || card.dataset.nmId || card.dataset.popupNmId;
-        if (direct) return direct;
-        const href = card.querySelector('a[href*="/catalog/"]')?.getAttribute("href") || "";
-        const m = href.match(/\/catalog\/(\d{4,})\/detail/i);
-        return m ? m[1] : "";
-      };
-      const getCardPrice = (card) => {
-        if (!card) return null;
-        const favoritesNowNode = card.querySelector('ins[class*="goodsCardPriceNow"], ins[class*="walletPrice"], p[class*="goodsCardPrice"] ins');
-        const favoritesInfo = parseBasketPriceText(favoritesNowNode?.textContent || "");
-        if (favoritesInfo) return favoritesInfo;
-        const primaryNode = card.querySelector('.list-item__price > div, [class*="list-item__price"] [class*="red-price"]');
-        const walletNode = card.querySelector('.list-item__price-wallet, [class*="list-item__price-wallet"], [class*="price-wallet"]');
-        const primaryInfo = parseBasketPriceText(primaryNode?.textContent || "");
-        const walletInfo = parseBasketPriceText(walletNode?.textContent || "");
-        if (primaryInfo && walletInfo) {
-          const low = Math.min(primaryInfo.price, walletInfo.price);
-          const high = Math.max(primaryInfo.price, walletInfo.price);
-          if (low > 0 && high / low >= 2.5) return primaryInfo.price >= walletInfo.price ? primaryInfo : walletInfo;
-          return primaryInfo.price <= walletInfo.price ? primaryInfo : walletInfo;
+        return "";
+      } catch (_) {
+        return "";
+      }
+    };
+    const getAsinFromCsaItemId = (value) => {
+      const m = String(value || "").match(/(?:^|[.:])asin\.([A-Z0-9]{10})(?:[.:]|$)/i) || String(value || "").match(/\b([A-Z0-9]{10})\b/i);
+      return normalizeAsin(m && m[1]);
+    };
+    const getPid = () => {
+      const fromUrl = getAsinFromHref(location.href);
+      if (fromUrl) return fromUrl;
+      const selectors = [
+        'input[name="asin"]',
+        "input#ASIN",
+        "input#asin",
+        "#averageCustomerReviews[data-asin]",
+        "[data-csa-c-asin]",
+        "[data-asin]"
+      ];
+      for (const selector of selectors) {
+        const node = document.querySelector(selector);
+        const value = node?.value || node?.getAttribute?.("data-asin") || node?.getAttribute?.("data-csa-c-asin") || "";
+        const asin = normalizeAsin(value);
+        if (asin) return asin;
+      }
+      return getAsinFromHref(document.querySelector('link[rel="canonical"]')?.href || "");
+    };
+    const isProductPage = () => /\/(?:dp|gp\/product|exec\/obidos\/ASIN)\/[A-Z0-9]{10}(?:[/?#]|$)/i.test(location.pathname || "") || !!document.querySelector("#dp, #centerCol #title, #ppd #title");
+    const getPriceRoot = () => document.querySelector("#corePriceDisplay_desktop_feature_div") || document.querySelector("#corePrice_feature_div") || document.querySelector("#apex_desktop") || document.querySelector("#buybox") || document.querySelector("#centerCol") || null;
+    const getAnchor = () => getPriceRoot();
+    const isOldPriceNode = (node) => !!(node && (node.closest('.a-text-price, [data-a-strike="true"], del') || /line-through/i.test(node.closest("[style]")?.getAttribute("style") || "")));
+    const parsePriceNode = (node) => {
+      if (!node) return null;
+      const text = clean(node.getAttribute?.("aria-label") || node.textContent || "");
+      const price = parsePriceValue(text);
+      if (!Number.isFinite(price)) return null;
+      return { price, currency: normalizeCurrency(detectCurrency(text) || "$"), text };
+    };
+    const getPagePrice = () => {
+      const hiddenValue = document.querySelector('input#priceValue, input[name="priceValue"]')?.value;
+      const hiddenPrice = Number(String(hiddenValue || "").replace(",", "."));
+      if (Number.isFinite(hiddenPrice) && hiddenPrice > 0) {
+        const symbol = document.querySelector('input#priceSymbol, input[name="priceSymbol"]')?.value || "$";
+        const currency = normalizeCurrency(symbol || document.querySelector("input#currencyOfPreference")?.value || "USD") || "$";
+        return { price: hiddenPrice, currency, text: `${symbol}${hiddenValue}` };
+      }
+      const selectors = [
+        "#corePriceDisplay_desktop_feature_div .priceToPay .a-offscreen",
+        '#corePriceDisplay_desktop_feature_div [data-a-color="price"] .a-offscreen',
+        "#corePriceDisplay_desktop_feature_div .a-price:not(.a-text-price) .a-offscreen",
+        "#corePrice_feature_div .a-price:not(.a-text-price) .a-offscreen",
+        "#apex_desktop .a-price:not(.a-text-price) .a-offscreen",
+        "#buybox .a-price:not(.a-text-price) .a-offscreen"
+      ];
+      for (const selector of selectors) {
+        const nodes = [...document.querySelectorAll(selector)].filter((node) => !isOldPriceNode(node));
+        for (const node of nodes) {
+          const parsed = parsePriceNode(node);
+          if (parsed) return parsed;
         }
-        if (primaryInfo) return primaryInfo;
-        if (walletInfo) return walletInfo;
-        const info = findPriceInCard(card, { defaultCurrency: "\u20BD" });
-        return info && Number.isFinite(Number(info.price)) ? { price: Number(info.price), currency: info.currency || "\u20BD", text: card.textContent || "" } : null;
-      };
-      const isWbCartCard = (card) => !!(card && (card.matches(".j-b-basket-item, .accordion__list-item.list-item") || card.closest(".basket-list, .accordion__list")) && card.querySelector("img, picture"));
-      const getCartBadgeTarget = (card) => {
-        const image = card.querySelector("picture img, img");
-        let imageBlock = image?.closest(".list-item__photo") || image?.closest('[class*="photo"]') || image?.closest('[class*="img"]') || image?.parentElement || card;
-        while (imageBlock && imageBlock !== card) {
-          const text = String(imageBlock.textContent || "").replace(/\s+/g, " ").trim();
-          if (imageBlock.querySelector("img, picture") && text.length <= 40) break;
-          imageBlock = imageBlock.parentElement;
+      }
+      const root = getPriceRoot();
+      const info = findPriceInCard(root || document.body, { defaultCurrency: "$" });
+      return info && Number.isFinite(Number(info.price)) ? { price: Number(info.price), currency: info.currency || "$", text: root?.textContent || "" } : null;
+    };
+    const getCardPid = (card) => {
+      if (!card) return "";
+      const attrs = [
+        card.getAttribute("data-asin"),
+        card.getAttribute("data-csa-c-asin"),
+        card.getAttribute("data-csa-c-item-id"),
+        card.querySelector("[data-asin]")?.getAttribute("data-asin"),
+        card.querySelector("[data-csa-c-asin]")?.getAttribute("data-csa-c-asin"),
+        card.querySelector("[data-csa-c-item-id]")?.getAttribute("data-csa-c-item-id")
+      ];
+      for (const value of attrs) {
+        const asin = getAsinFromCsaItemId(value) || normalizeAsin(value);
+        if (asin) return asin;
+      }
+      const link = card.querySelector('a[href*="/dp/"], a[href*="/gp/product/"], a[href*="pd_rd_i="], a[href*="asin="]');
+      return getAsinFromHref(link?.getAttribute("href") || link?.href || "");
+    };
+    const getCardPrice = (card) => {
+      if (!card) return null;
+      const dataPrice = Number(String(card.getAttribute("data-price") || "").replace(",", "."));
+      if (Number.isFinite(dataPrice) && dataPrice > 0) {
+        const text = card.getAttribute("data-price") || "";
+        return { price: dataPrice, currency: normalizeCurrency(detectCurrency(text) || "$"), text };
+      }
+      const selectors = [
+        '.a-price:not(.a-text-price):not([data-a-strike="true"]) .a-offscreen',
+        '.a-price[data-a-color="price"] .a-offscreen',
+        ".dcl-product-price-new .a-offscreen",
+        ".sc-apex-cart-price .a-price .a-offscreen",
+        '[data-a-color="price"] .a-offscreen'
+      ];
+      for (const selector of selectors) {
+        const nodes = [...card.querySelectorAll(selector)].filter((node) => !isOldPriceNode(node));
+        for (const node of nodes) {
+          const parsed = parsePriceNode(node);
+          if (parsed) return parsed;
         }
-        imageBlock = imageBlock && imageBlock !== card ? imageBlock : image?.parentElement || card;
-        imageBlock.classList.remove("mp-min-price-anchor--below-center");
-        imageBlock.classList.remove("mp-min-price-anchor--below");
-        imageBlock.classList.remove("mp-min-price-anchor--photo");
-        imageBlock.classList.add("mp-min-price-anchor--photo-inside");
-        return imageBlock;
-      };
-      startCardScanner({
-        collectGroups: () => collectGroupsFromCards({
-          market: "wb",
-          cardSelector: [
-            "article.product-card",
-            "article[data-nm-id]",
-            "article[data-popup-nm-id]",
-            "div.product-card[data-nm-id]",
-            "div.product-card[data-popup-nm-id]",
-            ".basket-list .j-b-basket-item",
-            ".basket-list .accordion__list-item.list-item",
-            ".accordion__list .j-b-basket-item",
-            'li[class*="goodsCardFavorites"]',
-            'li[id^="fav"][class*="goodsCard"]'
-          ].join(", "),
-          getPid: getCardPid,
-          getPrice: getCardPrice,
-          defaultCurrency: "\u20BD"
-        }),
-        getBadgeTarget: (card) => isWbCartCard(card) ? getCartBadgeTarget(card) : card.querySelector(".list-item__good") || card.querySelector(".list-item__good-info") || card.querySelector('[class*="imgWrap"]') || card.querySelector('a[href*="/catalog/"][href*="/detail"]') || card
-      });
-    }
+      }
+      const info = findPriceInCard(card, { defaultCurrency: "$" });
+      return info && Number.isFinite(Number(info.price)) ? { price: Number(info.price), currency: info.currency || "$", text: card.textContent || "" } : null;
+    };
+    const isCardCandidate = (card) => {
+      if (!card || !card.isConnected) return false;
+      if (card.closest('#customerReviews, #reviewsMedley, [id*="review" i]')) return false;
+      const rect = card.getBoundingClientRect();
+      if ((rect.width || 0) < 90 || (rect.height || 0) < 90) return false;
+      if (!card.querySelector("img, picture")) return false;
+      return !!getCardPid(card);
+    };
+    const getBadgeTarget = (card) => {
+      const image = card?.querySelector?.("img.s-image, .s-product-image-container img, .dcl-product-image-container img, img");
+      let target = image?.closest?.(".sc-image-wrapper, .s-product-image-container, .dcl-product-image-container, .a-section.aok-relative, .a-carousel-card") || image?.parentElement || card;
+      if (!target || !card.contains(target)) target = card;
+      target.classList.remove("mp-min-price-anchor--below-center");
+      target.classList.remove("mp-min-price-anchor--below");
+      target.classList.remove("mp-min-price-anchor--photo");
+      target.classList.add("mp-min-price-anchor--photo-inside");
+      return target;
+    };
     const detectCurrentProduct = () => {
-      const path = String(location.pathname || "");
-      const fromUrl = path.match(/\/catalog\/(\d{4,})\/detail/i) || path.match(/\/catalog\/(\d{4,})\/feedbacks/i);
-      const pid = fromUrl && fromUrl[1] || document.querySelector("[data-nm-id]")?.getAttribute("data-nm-id") || extractDigits(document.querySelector('meta[itemprop="sku"], meta[name="item_id"]')?.getAttribute("content") || "") || "";
+      const pid = getPid();
       if (!pid) return null;
       const priceInfo = getPagePrice();
       return {
-        market: "wb",
+        market: "amazon",
         pid,
-        pidKey: `wb:${pid}`,
-        currency: priceInfo?.currency || ""
+        pidKey: `amazon:${pid}`,
+        currency: priceInfo?.currency || "$"
       };
     };
     setCurrentProductDetector(detectCurrentProduct);
-    initWB();
+    startProductTracker({ market: "amazon", getPid, getPrice: getPagePrice, getAnchor, isProductPage });
+    startCardScanner({
+      collectGroups: () => collectGroupsFromCards({
+        market: "amazon",
+        cardSelector: [
+          '[data-component-type="s-search-result"]',
+          ".s-result-item[data-asin]",
+          ".puis-card-container",
+          ".sc-list-item[data-asin]",
+          ".dcl-product-wrapper",
+          '[data-csa-c-item-type="asin"]',
+          '[data-csa-c-item-id*="asin."]',
+          ".a-carousel-card"
+        ].join(", "),
+        getPid: getCardPid,
+        getPrice: getCardPrice,
+        isCardCandidate,
+        defaultCurrency: "$"
+      }),
+      getBadgeTarget
+    });
   })();
 })();

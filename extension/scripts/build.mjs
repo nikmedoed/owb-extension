@@ -3,10 +3,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import esbuild from "esbuild";
 
-const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const extensionDir = path.join(rootDir, "extension");
-const releaseDir = path.resolve(rootDir, process.env.RELEASE_DIR || "../owb-tools-release");
-const contentMarkets = ["ozon", "wb", "aliexpress"];
+const extensionDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const releaseDir = path.resolve(extensionDir, process.env.RELEASE_DIR || "../../owb-tools-release");
+const contentMarkets = ["ozon", "wb", "aliexpress", "amazon"];
 
 await rm(releaseDir, { recursive: true, force: true });
 await mkdir(releaseDir, { recursive: true });
@@ -17,7 +16,7 @@ await Promise.all([
   buildReleaseScripts(),
 ]);
 
-console.log(`Release folder: ${path.relative(rootDir, releaseDir)}`);
+console.log(`Release folder: ${path.relative(extensionDir, releaseDir)}`);
 
 async function copyStaticAssets() {
   await Promise.all([
