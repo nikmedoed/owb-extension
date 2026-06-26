@@ -37,6 +37,11 @@ server/.env
 server/.env.*
 
 # --- Extension build artifacts ---
+node_modules/
+dist/
+owb-tools-release/
+owb-tools-release.zip
+*.map
 extension/node_modules/
 extension/dist/
 extension/build/

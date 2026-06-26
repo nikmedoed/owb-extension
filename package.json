@@ -1,0 +1,15 @@
+{
+  "name": "owb-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build:local": "node scripts/build-local.mjs",
+    "build": "node scripts/build.mjs",
+    "prepare": "git config core.hooksPath .githooks"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.4"
+  }
+}

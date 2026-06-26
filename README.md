@@ -11,7 +11,8 @@
 
 ## Что в репозитории
 
-- `extension/` - Chrome extension (Manifest V3).
+- `extension/` - Chrome extension (Manifest V3) с committed local build-артефактами.
+- `scripts/` - сборка local/release через `esbuild`.
 - `server/` - локальный HTTP API сервер синхронизации на Python + SQLite.
 
 ## Ключевая функциональность
@@ -90,6 +91,15 @@
    - `python local_price_server.py`
 5. В `Options` расширения включить `Синхронизация`, если нужен режим `sync`.
 
+`extension/` хранит уже собранные content bundles, поэтому после скачивания репозитория расширение можно загрузить без Node.js. Node.js нужен для разработки и пересборки после изменения исходников.
+
+## Сборка
+
+- `npm run build:local` - пересобирает committed content bundles в `extension/content/*.js`. Эта команда запускается автоматически перед коммитом.
+- `npm run dev` - watch-режим для тех же локальных bundles.
+- `npm run build` - собирает минифицированную release-папку вне репозитория: `../owb-tools-release` по умолчанию. Путь можно переопределить через `RELEASE_DIR`.
+- `npm install` включает git hook через `prepare`; hook перед коммитом пересобирает и добавляет generated bundles в индекс.
+
 ## API локального сервера
 
 - `GET /ping` - доступность сервера.
@@ -103,6 +113,7 @@
 
 ## Важные технические детали
 
+- Сборка делается через `esbuild`: content scripts собираются в один файл на маркетплейс (`content/ozon.js`, `content/wb.js`, `content/aliexpress.js`) и хранятся в репозитории для `Load unpacked`.
 - `pidKey` формат: `ozon:<id>`, `wb:<id>` или `aliexpress:<id>`.
 - Последняя батч-сессия хранится в `chrome.storage.local` по ключу `owb-last-extract-session`.
 - При большом батч-результате текст сессии сохраняется с ограничением (защита от переполнения хранилища).

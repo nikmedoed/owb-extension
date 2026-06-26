@@ -1,6 +1,15 @@
 # OWB Tools Chrome Extension (MV3)
 
-Отдельное Chrome-расширение для Ozon/WB/AliExpress на базе ваших Tampermonkey-скриптов.
+Chrome-расширение для Ozon/WB/AliExpress на базе ваших Tampermonkey-скриптов.
+
+Эта папка должна быть самодостаточной для `Load unpacked`. Content bundles пересобираются из корня репозитория:
+
+```powershell
+npm install
+npm run build:local
+```
+
+После скачивания репозитория можно сразу использовать `Load unpacked` -> `extension`. Пересборка нужна только после изменения исходников.
 
 ## Что внутри
 
@@ -17,7 +26,7 @@
 - `popup/` - быстрый статус и настройки
 - `options/` - дефолты + экспорт/импорт всей БД расширения
 
-`manifest.json` разделяет content scripts по площадкам: код Ozon внедряется только на Ozon, код WB только на WB, код AliExpress только на AliExpress.
+`manifest.json` разделяет content scripts по площадкам и подключает по одному bundled entrypoint на маркетплейс: `content/ozon.js`, `content/wb.js`, `content/aliexpress.js`.
 
 ## Источники, откуда перенесено
 

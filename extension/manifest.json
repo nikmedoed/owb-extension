@@ -62,11 +62,7 @@
         "*://*.ozon.ge/*"
       ],
       "js": [
-        "content/mp-core.js",
-        "content/exporter/common.js",
-        "content/exporter/ozon.js",
-        "content/price-monitor/common.js",
-        "content/price-monitor/ozon.js"
+        "content/ozon.js"
       ],
       "run_at": "document_idle"
     },
@@ -82,11 +78,7 @@
         "*://*.wb.ru/*"
       ],
       "js": [
-        "content/mp-core.js",
-        "content/exporter/common.js",
-        "content/exporter/wb.js",
-        "content/price-monitor/common.js",
-        "content/price-monitor/wb.js"
+        "content/wb.js"
       ],
       "run_at": "document_idle"
     },
@@ -96,11 +88,7 @@
         "*://*.aliexpress.com/*"
       ],
       "js": [
-        "content/mp-core.js",
-        "content/exporter/common.js",
-        "content/exporter/aliexpress.js",
-        "content/price-monitor/common.js",
-        "content/price-monitor/aliexpress.js"
+        "content/aliexpress.js"
       ],
       "run_at": "document_idle"
     }
