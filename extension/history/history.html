@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Редактор истории цен</title>
+  <link rel="stylesheet" href="history.css">
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div>
+        <h1>Редактор истории цен</h1>
+        <p id="subtitle" class="muted"></p>
+      </div>
+      <div class="top-actions">
+        <button id="reloadBtn" type="button" class="alt">Обновить</button>
+        <button id="resetBtn" type="button" class="danger">Сбросить товар</button>
+      </div>
+    </header>
+
+    <section class="search-row">
+      <label class="field">
+        <span>pidKey</span>
+        <input id="pidKeyInput" type="text" placeholder="aliexpress:1234567890">
+      </label>
+      <label class="field currency-field">
+        <span>Валюта</span>
+        <input id="currencyInput" type="text" placeholder="авто">
+      </label>
+      <button id="loadBtn" type="button">Загрузить</button>
+    </section>
+
+    <section class="panel">
+      <div class="summary">
+        <p id="statusLine" class="status"></p>
+        <p id="metaLine" class="muted"></p>
+      </div>
+      <canvas id="chartCanvas" width="960" height="220"></canvas>
+    </section>
+
+    <section class="panel">
+      <div class="section-head">
+        <h2>Интервалы</h2>
+        <div class="bulk-actions">
+          <label class="check-all">
+            <input id="selectAllBox" type="checkbox">
+            <span id="countLine" class="muted"></span>
+          </label>
+          <button id="deleteSelectedBtn" type="button" class="danger" disabled>Удалить выбранные</button>
+        </div>
+      </div>
+      <div id="intervalList" class="interval-list"></div>
+    </section>
+  </main>
+  <script src="history.js"></script>
+</body>
+</html>

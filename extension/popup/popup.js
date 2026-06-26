@@ -9,6 +9,7 @@ const chartMetaEl = document.getElementById('chartMeta');
 const chartCanvasEl = document.getElementById('chartCanvas');
 const chartHintEl = document.getElementById('chartHint');
 const resetProductBtn = document.getElementById('resetProductBtn');
+const editHistoryBtn = document.getElementById('editHistoryBtn');
 const batchDownloadBtn = document.getElementById('batchDownloadBtn');
 const batchDownloadAllBtn = document.getElementById('batchDownloadAllBtn');
 const batchCopyBtn = document.getElementById('batchCopyBtn');
@@ -20,6 +21,7 @@ const copyLastSessionBtn = document.getElementById('copyLastSessionBtn');
 
 const MARKET_HOST_RE = /(^|\.)((ozon\.(ru|com|kz|by|uz|am|kg|ge))|(wildberries\.(ru|by|kz|uz|am|kg|ge))|(wb\.ru)|(aliexpress\.(ru|com)))$/i;
 let currentProduct = null;
+let currentIntervalCount = 0;
 
 const sendRuntimeMessage = (message) => new Promise((resolve, reject) => {
     chrome.runtime.sendMessage(message, (response) => {
@@ -61,6 +63,13 @@ const updateResetButtonState = (busy = false) => {
     resetProductBtn.disabled = busy || !hasCurrentProduct;
 };
 
+const updateEditHistoryButtonState = (busy = false) => {
+    if (!editHistoryBtn) return;
+    const hasCurrentProduct = !!(currentProduct && currentProduct.pidKey);
+    editHistoryBtn.hidden = !hasCurrentProduct;
+    editHistoryBtn.disabled = busy || !hasCurrentProduct;
+};
+
 const withBusy = (busy) => {
     if (batchDownloadBtn) batchDownloadBtn.disabled = busy;
     if (batchDownloadAllBtn) batchDownloadAllBtn.disabled = busy;
@@ -69,6 +78,7 @@ const withBusy = (busy) => {
     if (closeDuplicatesBtn) closeDuplicatesBtn.disabled = busy;
     if (copyLastSessionBtn) copyLastSessionBtn.disabled = busy;
     updateResetButtonState(busy);
+    updateEditHistoryButtonState(busy);
 };
 
 const setBatchMeta = (text) => {
@@ -200,8 +210,9 @@ const intervalsToSeries = (intervals) => {
         const firstTs = Number(item && item.firstTs);
         const lastTs = Number(item && item.lastTs);
         if (!Number.isFinite(price) || !Number.isFinite(firstTs) || !Number.isFinite(lastTs)) return;
-        out.push({ ts: Math.min(firstTs, lastTs), price, currency: String(item.currency || '') });
-        if (lastTs !== firstTs) out.push({ ts: Math.max(firstTs, lastTs), price, currency: String(item.currency || '') });
+        const base = { price, currency: String(item.currency || '') };
+        out.push({ ...base, ts: Math.min(firstTs, lastTs) });
+        if (lastTs !== firstTs) out.push({ ...base, ts: Math.max(firstTs, lastTs) });
     });
     const map = new Map();
     out.forEach((p) => {
@@ -217,6 +228,7 @@ const formatPrice = (value, currency = '') => {
 };
 
 const clearQuickChart = (title, meta, hint) => {
+    currentIntervalCount = 0;
     quickChartEl.hidden = false;
     chartTitleEl.textContent = title || 'График текущего товара';
     chartMetaEl.textContent = meta || '';
@@ -285,7 +297,7 @@ const drawQuickChart = (points, currency) => {
 
     const currentPrice = points[points.length - 1].price;
     chartMetaEl.textContent = `Текущая ${formatPrice(currentPrice, currency)} · Мин ${formatPrice(min, currency)} · Макс ${formatPrice(max, currency)}`;
-    chartHintEl.textContent = `${points.length} точек · ${new Date(minTs).toLocaleDateString('ru-RU')} — ${new Date(maxTs).toLocaleDateString('ru-RU')}`;
+    chartHintEl.textContent = `${currentIntervalCount || points.length} интервалов · ${new Date(minTs).toLocaleDateString('ru-RU')} — ${new Date(maxTs).toLocaleDateString('ru-RU')}`;
 };
 
 const loadQuickChart = async () => {
@@ -293,6 +305,7 @@ const loadQuickChart = async () => {
     if (!tab || !tab.url) {
         currentProduct = null;
         updateResetButtonState();
+        updateEditHistoryButtonState();
         clearQuickChart('График текущего товара', '', 'Активная вкладка не найдена');
         return;
     }
@@ -304,11 +317,14 @@ const loadQuickChart = async () => {
     if (!current || !current.pidKey) {
         currentProduct = null;
         updateResetButtonState();
+        updateEditHistoryButtonState();
         quickChartEl.hidden = true;
         return;
     }
     currentProduct = current;
+    currentIntervalCount = 0;
     updateResetButtonState();
+    updateEditHistoryButtonState();
 
     quickChartEl.hidden = false;
     chartTitleEl.textContent = `График: ${current.pidKey}`;
@@ -326,13 +342,30 @@ const loadQuickChart = async () => {
         return;
     }
     const intervals = Array.isArray(response.data?.intervals) ? response.data.intervals : [];
-    const points = intervalsToSeries(intervals);
+    const cleanIntervals = intervals
+        .filter((item) => item && Number.isFinite(Number(item.price)) && Number.isFinite(Number(item.firstTs)) && Number.isFinite(Number(item.lastTs)))
+        .sort((a, b) => Number(a.firstTs || 0) - Number(b.firstTs || 0));
+    currentIntervalCount = cleanIntervals.length;
+    const points = intervalsToSeries(cleanIntervals);
     if (!points.length) {
         clearQuickChart(`График: ${current.pidKey}`, 'История пока пустая', 'Открой карточку товара и подожди сбор цены');
         return;
     }
     const currency = points[points.length - 1].currency || '₽';
     drawQuickChart(points, currency);
+};
+
+const openHistoryEditor = async () => {
+    const pidKey = currentProduct && currentProduct.pidKey ? String(currentProduct.pidKey) : '';
+    if (!pidKey) return;
+    const response = await sendRuntimeMessage({
+        type: 'owb:price-open-history-editor',
+        payload: {
+            pidKey,
+            currency: String(currentProduct.currency || '').trim(),
+        },
+    });
+    if (!response || !response.ok) throw new Error(response && response.error ? response.error : 'Ошибка открытия редактора');
 };
 
 const refreshStatus = async () => {
@@ -474,6 +507,13 @@ if (closeDuplicatesBtn) {
         });
     });
 }
+if (editHistoryBtn) {
+    editHistoryBtn.addEventListener('click', () => {
+        openHistoryEditor().catch((err) => {
+            setStatus(String(err && err.message ? err.message : err), '', true);
+        });
+    });
+}
 if (copyLastSessionBtn) {
     copyLastSessionBtn.addEventListener('click', async () => {
         const text = String((lastSessionTextEl && lastSessionTextEl.value) || '').trim();
@@ -504,7 +544,11 @@ if (resetProductBtn) {
             if (!response || !response.ok) throw new Error(response && response.error ? response.error : 'Ошибка удаления истории');
             const deletedIntervals = Number(response.data?.deletedIntervals) || 0;
             const deletedProduct = response.data?.deletedProduct ? 'да' : 'нет';
-            setStatus('История удалена', `pidKey: ${pidKey} · интервалов: ${deletedIntervals} · карточка: ${deletedProduct}`);
+            const server = response.data?.server;
+            const serverText = server && server.ok === false
+                ? ` · сервер не очищен: ${server.error || 'ошибка'}`
+                : (server && !server.skipped ? ` · сервер: ${Number(server.deletedIntervals) || 0}` : '');
+            setStatus('История удалена', `pidKey: ${pidKey} · интервалов: ${deletedIntervals} · карточка: ${deletedProduct}${serverText}`, !!(server && server.ok === false));
             await loadQuickChart();
         } catch (err) {
             setStatus(String(err && err.message ? err.message : err), '', true);

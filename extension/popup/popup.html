@@ -41,7 +41,10 @@
     <section id="quickChart" class="chart-card" hidden>
       <div class="chart-head">
         <p id="chartTitle" class="chart-title">График текущего товара</p>
-        <button id="resetProductBtn" type="button" class="danger inline" hidden>Сбросить</button>
+        <div class="chart-actions">
+          <button id="editHistoryBtn" type="button" class="alt inline" hidden>Править</button>
+          <button id="resetProductBtn" type="button" class="danger inline" hidden>Сбросить</button>
+        </div>
       </div>
       <p id="chartMeta" class="meta-line"></p>
       <canvas id="chartCanvas" width="296" height="96"></canvas>

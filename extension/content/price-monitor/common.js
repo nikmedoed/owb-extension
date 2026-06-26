@@ -78,11 +78,16 @@ const CFG = {
     const bgGetStatus = async () => callBg('owb:price-get-status', {}, 10000);
     const bgSetConfig = async (payload) => callBg('owb:price-set-config', { payload }, 10000);
     const bgSyncNow = async () => callBg('owb:price-sync-now', {}, 10000);
+    const bgOpenHistoryEditor = async (pidKey, currency = '') => callBg('owb:price-open-history-editor', { payload: { pidKey, currency } }, 10000);
 
     const ensureChartStyles = () => addStyleOnce(`
         .mp-price-chart{margin-top:8px;margin-bottom:8px;padding:8px 10px 10px;border-radius:10px;border:1px solid rgba(0,0,0,0.08);background:linear-gradient(135deg,#f7f7f7,#ffffff);box-shadow:0 6px 16px rgba(0,0,0,0.08);color:#222;max-width:420px;width:100%;box-sizing:border-box;min-width:0;font-size:12px;line-height:1.3}
         .mp-price-chart__row{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:4px}
         .mp-price-chart__title{font-weight:600;font-size:12px}
+        .mp-price-chart__actions{display:flex;align-items:center;justify-content:flex-end;gap:6px;min-width:0}
+        .mp-price-chart__edit{border:1px solid rgba(26,115,232,0.35);border-radius:5px;background:#fff;color:#1a73e8;font:inherit;font-size:10px;line-height:1;padding:3px 5px;cursor:pointer;white-space:nowrap}
+        .mp-price-chart__edit:hover{border-color:#1a73e8}
+        .mp-price-chart__edit[hidden]{display:none}
         .mp-price-chart__stats{font-size:11px;color:#555;text-align:right}
         .mp-price-chart__canvas-wrap{position:relative}
         .mp-price-chart canvas{width:100%;height:120px;display:block;max-width:100%}
@@ -102,6 +107,52 @@ const CFG = {
         .mp-min-price-badge--empty{display:none}
     `, 'mp-price-monitor');
 
+    const ensureChartEditorButton = (container) => {
+        if (!container) return null;
+        let button = container.querySelector('.mp-price-chart__edit');
+        if (!button) {
+            const row = container.querySelector('.mp-price-chart__row');
+            const stats = container.querySelector('.mp-price-chart__stats');
+            let actions = container.querySelector('.mp-price-chart__actions');
+            if (!actions) {
+                actions = document.createElement('div');
+                actions.className = 'mp-price-chart__actions';
+                if (stats) actions.appendChild(stats);
+                if (row) row.appendChild(actions);
+            }
+            button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'mp-price-chart__edit';
+            button.textContent = 'Править';
+            actions.appendChild(button);
+        }
+        if (!button.__mpHistoryEditorAttached) {
+            button.__mpHistoryEditorAttached = true;
+            button.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const target = container.__mpHistoryEditorTarget || {};
+                const pidKey = String(target.pidKey || '').trim();
+                if (!pidKey) return;
+                bgOpenHistoryEditor(pidKey, String(target.currency || '')).catch((err) => {
+                    console.warn('[OWB] cannot open history editor:', err);
+                });
+            });
+        }
+        return button;
+    };
+
+    const setChartEditorTarget = (container, pidKey, currency = '') => {
+        if (!container) return;
+        const cleanPidKey = String(pidKey || '').trim();
+        container.__mpHistoryEditorTarget = {
+            pidKey: cleanPidKey,
+            currency: String(currency || ''),
+        };
+        const button = ensureChartEditorButton(container);
+        if (button) button.hidden = !cleanPidKey;
+    };
+
     const ensureChartContainer = (container, anchor, floating) => {
         ensureChartStyles();
         if (!container) {
@@ -110,7 +161,10 @@ const CFG = {
             container.innerHTML = `
                 <div class="mp-price-chart__row">
                     <div class="mp-price-chart__title">История цены</div>
-                    <div class="mp-price-chart__stats"></div>
+                    <div class="mp-price-chart__actions">
+                        <div class="mp-price-chart__stats"></div>
+                        <button type="button" class="mp-price-chart__edit" hidden>Править</button>
+                    </div>
                 </div>
                 <div class="mp-price-chart__canvas-wrap">
                     <canvas></canvas>
@@ -119,6 +173,7 @@ const CFG = {
                 <div class="mp-price-chart__dates"><span></span><span></span></div>
             `;
         }
+        ensureChartEditorButton(container);
         let targetAnchor = anchor;
         if (targetAnchor && targetAnchor.tagName === 'SPAN') targetAnchor = targetAnchor.parentElement || targetAnchor;
         if (floating || !targetAnchor) {
@@ -362,6 +417,7 @@ const CFG = {
                 const priceInfo = opts.getPrice();
                 const anchor = opts.getAnchor ? opts.getAnchor() : null;
                 state.chart = ensureChartContainer(state.chart, anchor, !anchor);
+                setChartEditorTarget(state.chart, state.pidKey, priceInfo?.currency || state.lastCurrency || '');
 
                 const record = toCaptureRecord(state.pidKey, pid, priceInfo);
                 let captured = false;

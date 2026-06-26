@@ -144,11 +144,22 @@ textarea#lastSessionText {
   gap: 3px;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 .chart-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.chart-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex-shrink: 0;
 }
 
 .chart-title {
@@ -172,6 +183,12 @@ button.danger {
 }
 
 button.danger.inline {
+  padding: 3px 7px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+button.alt.inline {
   padding: 3px 7px;
   font-size: 11px;
   white-space: nowrap;

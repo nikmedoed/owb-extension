@@ -309,6 +309,52 @@ class PriceStore:
             )
             return [self._row_to_dict(row) for row in cur.fetchall()]
 
+    def delete_history(self, pid_key: str) -> Dict[str, Any]:
+        clean_pid_key = str(pid_key or "").strip()
+        if not clean_pid_key:
+            return {"pidKey": "", "deletedIntervals": 0}
+        with self.lock:
+            cur = self.conn.cursor()
+            cur.execute("DELETE FROM price_intervals WHERE pid_key=?", (clean_pid_key,))
+            deleted = int(cur.rowcount if cur.rowcount is not None else 0)
+            self.conn.commit()
+            return {"pidKey": clean_pid_key, "deletedIntervals": deleted}
+
+    def delete_interval(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        pid_key = str(payload.get("pidKey") or payload.get("pid_key") or "").strip()
+        if not pid_key:
+            raise ValueError("pidKey is required")
+        price = float(payload.get("price"))
+        currency = normalize_currency(payload.get("currency"))
+        first_ts = int(payload.get("firstTs") if "firstTs" in payload else payload.get("first_ts"))
+        last_ts = int(payload.get("lastTs") if "lastTs" in payload else payload.get("last_ts"))
+        if first_ts > last_ts:
+            first_ts, last_ts = last_ts, first_ts
+
+        with self.lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                """
+                DELETE FROM price_intervals
+                WHERE pid_key=?
+                  AND ABS(price - ?) < 0.000000001
+                  AND currency=?
+                  AND first_ts=?
+                  AND last_ts=?
+                """,
+                (pid_key, price, currency, first_ts, last_ts),
+            )
+            deleted = int(cur.rowcount if cur.rowcount is not None else 0)
+            self.conn.commit()
+            return {
+                "pidKey": pid_key,
+                "price": price,
+                "currency": currency,
+                "firstTs": first_ts,
+                "lastTs": last_ts,
+                "deletedIntervals": deleted,
+            }
+
     def changes(self, since_ts: int, since_id: int, limit: int) -> List[Dict[str, Any]]:
         with self.lock:
             cur = self.conn.cursor()
@@ -673,6 +719,25 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             result = STORE.upsert_many(normalized)
+            write_json(self, {"status": "ok", **result, "serverTime": now_ms()})
+            return
+
+        if parsed.path == "/api/intervals/delete":
+            try:
+                result = STORE.delete_interval(payload)
+                write_json(self, {"status": "ok", **result, "serverTime": now_ms()})
+            except (TypeError, ValueError) as exc:
+                write_json(self, {"error": f"bad payload: {exc}"}, status=400)
+            except Exception as exc:
+                write_json(self, {"error": str(exc)}, status=500)
+            return
+
+        if parsed.path == "/api/history/delete":
+            pid_key = str(payload.get("pidKey") or "").strip()
+            if not pid_key:
+                write_json(self, {"error": "pidKey is required"}, status=400)
+                return
+            result = STORE.delete_history(pid_key)
             write_json(self, {"status": "ok", **result, "serverTime": now_ms()})
             return
 

@@ -773,6 +773,140 @@ const resetPriceHistoryByPid = async (pidKey) => {
     return { pidKey: cleanPidKey, deletedIntervals, deletedProduct };
 };
 
+const normalizeDeleteIntervalPayload = (payload = {}) => {
+    const pidKey = String(payload.pidKey || '').trim();
+    if (!pidKey) throw new Error('pidKey is required');
+    const key = String(payload.key || '').trim();
+    const price = Number(payload.price);
+    const firstTs = toInt(payload.firstTs, NaN);
+    const lastTs = toInt(payload.lastTs, NaN);
+    const currency = String(payload.currency || '');
+    return {
+        pidKey,
+        key,
+        price,
+        currency,
+        firstTs: Math.min(firstTs, lastTs),
+        lastTs: Math.max(firstTs, lastTs),
+        hasExactRange: Number.isFinite(price) && Number.isFinite(firstTs) && Number.isFinite(lastTs),
+    };
+};
+
+const deletePriceIntervalLocal = async (payload = {}) => {
+    const target = normalizeDeleteIntervalPayload(payload);
+    if (!target.key && !target.hasExactRange) {
+        throw new Error('interval key or exact interval fields are required');
+    }
+
+    const db = await openPriceDb();
+    const tx = db.transaction(PRICE_DB.intervals, 'readwrite');
+    const store = tx.objectStore(PRICE_DB.intervals);
+    const deleted = [];
+
+    if (target.key) {
+        const row = await idbReq(store.get(target.key));
+        if (row && String(row.pidKey || '') === target.pidKey) {
+            store.delete(target.key);
+            deleted.push(row);
+        }
+    }
+
+    if (!deleted.length && target.hasExactRange) {
+        const idx = store.index('byPidFirst');
+        const range = IDBKeyRange.bound([target.pidKey, 0], [target.pidKey, Number.MAX_SAFE_INTEGER]);
+        const rows = await idbReq(idx.getAll(range));
+        (Array.isArray(rows) ? rows : []).forEach((row) => {
+            if (!row) return;
+            if (!eq(row.price, target.price)) return;
+            if (String(row.currency || '') !== target.currency) return;
+            if (toInt(row.firstTs, 0) !== target.firstTs || toInt(row.lastTs, 0) !== target.lastTs) return;
+            store.delete(row.key);
+            deleted.push(row);
+        });
+    }
+
+    await txDone(tx);
+    if (deleted.length) await rebuildProductSummaries([target.pidKey]);
+    return {
+        pidKey: target.pidKey,
+        deletedIntervals: deleted.length,
+        interval: deleted[0] || (target.hasExactRange ? {
+            pidKey: target.pidKey,
+            price: target.price,
+            currency: target.currency,
+            firstTs: target.firstTs,
+            lastTs: target.lastTs,
+        } : null),
+    };
+};
+
+const deleteServerInterval = async (cfg, interval) => {
+    if (!cfg || cfg.mode !== 'sync' || !cfg.serverUrl || !interval) return { ok: true, skipped: true };
+    const response = await serverFetchJson(cfg.serverUrl, '/api/intervals/delete', {
+        method: 'POST',
+        timeoutMs: Math.max(SYNC_CFG.requestTimeoutMs, 3000),
+        body: {
+            pidKey: interval.pidKey,
+            price: interval.price,
+            currency: interval.currency || '',
+            firstTs: interval.firstTs,
+            lastTs: interval.lastTs,
+        },
+    });
+    if (!response.ok || response.data?.status !== 'ok') {
+        return { ok: false, error: response.error || response.data?.error || 'server-delete-failed' };
+    }
+    return {
+        ok: true,
+        deletedIntervals: Number(response.data?.deletedIntervals) || 0,
+    };
+};
+
+const deleteServerHistoryByPid = async (cfg, pidKey) => {
+    if (!cfg || cfg.mode !== 'sync' || !cfg.serverUrl || !pidKey) return { ok: true, skipped: true };
+    const response = await serverFetchJson(cfg.serverUrl, '/api/history/delete', {
+        method: 'POST',
+        timeoutMs: Math.max(SYNC_CFG.requestTimeoutMs, 3000),
+        body: { pidKey },
+    });
+    if (!response.ok || response.data?.status !== 'ok') {
+        return { ok: false, error: response.error || response.data?.error || 'server-history-delete-failed' };
+    }
+    return {
+        ok: true,
+        deletedIntervals: Number(response.data?.deletedIntervals) || 0,
+    };
+};
+
+const deletePriceInterval = async (payload = {}) => {
+    const local = await deletePriceIntervalLocal(payload);
+    const cfg = await loadSyncConfig();
+    const server = await deleteServerInterval(cfg, local.interval).catch((err) => ({
+        ok: false,
+        error: String(err && err.message ? err.message : err),
+    }));
+    if (server.ok !== false) {
+        SYNC_STATE.historyFetchedAt.delete(local.pidKey);
+        SYNC_STATE.minFetchedAt.delete(local.pidKey);
+    }
+    return { ...local, server };
+};
+
+const resetMergedPriceHistoryByPid = async (pidKey) => {
+    const cleanPidKey = String(pidKey || '').trim();
+    const local = await resetPriceHistoryByPid(cleanPidKey);
+    const cfg = await loadSyncConfig();
+    const server = await deleteServerHistoryByPid(cfg, cleanPidKey).catch((err) => ({
+        ok: false,
+        error: String(err && err.message ? err.message : err),
+    }));
+    if (server.ok !== false) {
+        SYNC_STATE.historyFetchedAt.delete(cleanPidKey);
+        SYNC_STATE.minFetchedAt.delete(cleanPidKey);
+    }
+    return { ...local, server };
+};
+
 const resetPriceHistoryByMarket = async (market) => {
     const cleanMarket = String(market || '').trim().toLowerCase();
     if (!['ozon', 'wb', 'aliexpress'].includes(cleanMarket)) {
@@ -1638,6 +1772,28 @@ const getMergedMinBatch = async (pidKeys, preferredCurrencies = {}) => {
     return getMinBatch(keys, preferredCurrencies);
 };
 
+const openPriceHistoryEditor = async (payload = {}) => {
+    const pidKey = String(payload.pidKey || '').trim();
+    if (!pidKey) throw new Error('pidKey is required');
+    const params = new URLSearchParams({ pidKey });
+    const currency = normalizeCurrency(payload.currency || payload.preferredCurrency);
+    if (currency) params.set('currency', currency);
+    const url = chrome.runtime.getURL(`history/history.html?${params.toString()}`);
+    const width = Math.max(760, Math.min(1120, toInt(payload.width, 980)));
+    const height = Math.max(520, Math.min(900, toInt(payload.height, 720)));
+    const win = await windowsCreate({
+        url,
+        type: 'popup',
+        width,
+        height,
+        focused: true,
+    });
+    return {
+        windowId: toInt(win?.id, 0),
+        url,
+    };
+};
+
 const LAST_EXTRACT_SESSION_KEY = 'owb-last-extract-session';
 const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const tabsQuery = (queryInfo) => new Promise((resolve, reject) => {
@@ -1678,6 +1834,20 @@ const windowsUpdate = (windowId, updateInfo) => new Promise((resolve) => {
     chrome.windows.update(Number(windowId), updateInfo || {}, (win) => {
         const err = chrome.runtime.lastError;
         resolve(err ? null : (win || null));
+    });
+});
+const windowsCreate = (createData) => new Promise((resolve, reject) => {
+    if (!(chrome.windows && typeof chrome.windows.create === 'function')) {
+        reject(new Error('Windows API is unavailable'));
+        return;
+    }
+    chrome.windows.create(createData, (win) => {
+        const err = chrome.runtime.lastError;
+        if (err) {
+            reject(new Error(err.message || 'Cannot create window'));
+            return;
+        }
+        resolve(win || null);
     });
 });
 const tabsGet = (tabId) => new Promise((resolve, reject) => {
@@ -2210,14 +2380,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
                             : {}),
                 ),
             };
+        case 'owb:price-open-history-editor':
+            return { ok: true, data: await openPriceHistoryEditor(message.payload || message || {}) };
         case 'owb:price-export':
             return { ok: true, data: await exportPriceDb() };
         case 'owb:price-inspect':
             return { ok: true, data: await inspectPriceDb((message.options || message.payload || {})) };
         case 'owb:price-import':
             return { ok: true, data: await importPriceDb(message.payload || {}) };
+        case 'owb:price-delete-interval':
+            return { ok: true, data: await deletePriceInterval(message.payload || message.interval || {}) };
         case 'owb:price-reset-product':
-            return { ok: true, data: await resetPriceHistoryByPid(message.pidKey || message.payload?.pidKey || '') };
+            return { ok: true, data: await resetMergedPriceHistoryByPid(message.pidKey || message.payload?.pidKey || '') };
         case 'owb:price-reset-market':
             return { ok: true, data: await resetPriceHistoryByMarket(message.market || message.payload?.market || '') };
         case 'owb:price-get-status':

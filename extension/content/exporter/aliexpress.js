@@ -757,8 +757,9 @@
         }));
         setInterval(() => {
             attachActionButtons(getTitleNode(), 'aliexpress', [
-                { label: 'Скачать все отзывы', kind: 'all', run: () => exportAliExpress({ includeReviews: true, copyOnly: false }) },
-                { label: 'Копировать все отзывы', kind: 'copy_all', pendingText: 'Копирую...', successText: 'Скопировано', toastSuccess: 'Скопировано в буфер', run: () => exportAliExpress({ includeReviews: true, copyOnly: true }) },
+                { label: 'Скачать с отзывами', kind: 'full', run: () => exportAliExpress({ includeReviews: true, copyOnly: false, maxReviews: ALI_DEFAULT_MAX_REVIEWS }) },
+                { label: 'в буфер', kind: 'copy', pendingText: 'Копирую...', successText: 'Скопировано', toastSuccess: 'Скопировано в буфер', run: () => exportAliExpress({ includeReviews: false, copyOnly: true }) },
+                { label: 'в буфер с отзывами', kind: 'copy_all', pendingText: 'Копирую...', successText: 'Скопировано', toastSuccess: 'Скопировано в буфер', run: () => exportAliExpress({ includeReviews: true, copyOnly: true, maxReviews: ALI_DEFAULT_MAX_REVIEWS }) },
             ]);
         }, 1000);
     }

@@ -34,6 +34,7 @@
         .mp-export-actions .mp-export-btn[data-kind="full"]{background:#1c7ed6}
         .mp-export-actions .mp-export-btn[data-kind="all"]{background:#f08c00}
         .mp-export-actions .mp-export-btn[data-kind="copy"]{background:#6f42c1}
+        .mp-export-actions .mp-export-btn[data-kind="copy_all"]{background:#6f42c1}
         .mp-export-actions .mp-export-btn:disabled{opacity:.65;cursor:default}
     `, 'mp-export-actions');
 

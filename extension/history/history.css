@@ -1,0 +1,272 @@
+:root {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  font: 14px/1.4 "Segoe UI", Tahoma, sans-serif;
+  color: #1f2328;
+  background: #f6f8fa;
+}
+
+.app {
+  width: min(1120px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 18px 0 28px;
+  display: grid;
+  gap: 12px;
+}
+
+.topbar,
+.search-row,
+.section-head,
+.interval-row {
+  display: flex;
+  align-items: center;
+}
+
+.topbar,
+.section-head {
+  justify-content: space-between;
+  gap: 16px;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+h2 {
+  font-size: 16px;
+}
+
+.muted {
+  color: #5f6b7a;
+}
+
+.top-actions,
+.search-row {
+  display: flex;
+  gap: 8px;
+}
+
+.search-row {
+  align-items: flex-end;
+}
+
+.field {
+  display: grid;
+  gap: 4px;
+  flex: 1;
+}
+
+.currency-field {
+  flex: 0 0 120px;
+}
+
+.field span {
+  color: #4b5563;
+  font-size: 12px;
+}
+
+input,
+button {
+  font: inherit;
+}
+
+input[type="text"] {
+  height: 34px;
+  box-sizing: border-box;
+  border: 1px solid #c7d1dc;
+  border-radius: 7px;
+  padding: 6px 8px;
+  background: #fff;
+}
+
+button {
+  min-height: 34px;
+  border: 1px solid #2766d4;
+  border-radius: 7px;
+  padding: 6px 10px;
+  background: #2f7af0;
+  color: #fff;
+  cursor: pointer;
+}
+
+button.alt {
+  border-color: #97a8bf;
+  background: #fff;
+  color: #223046;
+}
+
+button.danger {
+  border-color: #d92d20;
+  background: #fff5f5;
+  color: #b42318;
+}
+
+button.icon-danger {
+  width: 30px;
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-color: #d92d20;
+  background: #fff5f5;
+  color: #b42318;
+  line-height: 0;
+}
+
+button.icon-danger svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+  stroke: currentColor;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.panel {
+  border: 1px solid #d1dae5;
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.summary {
+  min-height: 38px;
+  display: grid;
+  gap: 2px;
+}
+
+.status {
+  font-weight: 600;
+}
+
+#chartCanvas {
+  width: 100%;
+  height: 220px;
+  display: block;
+}
+
+.interval-list {
+  display: grid;
+  gap: 6px;
+}
+
+.interval-row {
+  gap: 10px;
+  min-height: 38px;
+  border: 1px solid #e1e7ef;
+  border-radius: 7px;
+  background: #fbfcfe;
+  padding: 6px 8px;
+}
+
+.row-check {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
+.interval-row:hover {
+  border-color: #b9c6d6;
+}
+
+.interval-price {
+  min-width: 150px;
+  font-weight: 600;
+}
+
+.interval-dates {
+  flex: 1;
+  color: #394150;
+}
+
+.interval-meta {
+  min-width: 115px;
+  color: #5f6b7a;
+  text-align: right;
+  font-size: 12px;
+}
+
+.bulk-actions,
+.check-all {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bulk-actions {
+  justify-content: flex-end;
+}
+
+.check-all input {
+  width: 16px;
+  height: 16px;
+}
+
+#deleteSelectedBtn {
+  min-height: 30px;
+  padding: 4px 9px;
+}
+
+.empty {
+  padding: 18px;
+  text-align: center;
+  color: #5f6b7a;
+}
+
+@media (max-width: 720px) {
+  .app {
+    width: calc(100vw - 20px);
+    padding-top: 10px;
+  }
+
+  .topbar,
+  .search-row,
+  .interval-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .top-actions {
+    width: 100%;
+  }
+
+  .top-actions button,
+  .search-row button {
+    flex: 1;
+  }
+
+  .currency-field {
+    flex: 1;
+  }
+
+  .interval-meta {
+    min-width: 0;
+    text-align: left;
+  }
+
+  .bulk-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  button.icon-danger {
+    width: 100%;
+  }
+}
