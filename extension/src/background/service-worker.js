@@ -27,7 +27,7 @@ const SYNC_CFG = {
     historyFetchTtlMs: 15000,
 };
 const DEFAULT_SERVER_URL = 'http://127.0.0.1:8765';
-const PRODUCT_SUMMARY_VERSION = 6;
+const PRODUCT_SUMMARY_VERSION = 7;
 const WB_OUTLIER_CFG = {
     minNeighborRatio: 2.5,
     maxNeighborSpread: 1.25,
@@ -53,6 +53,12 @@ const ALI_OUTLIER_CFG = {
         '₩': 700,
     },
     maxDurationMs: 45 * 60 * 1000,
+};
+const AMAZON_OUTLIER_CFG = {
+    expectedScale: 100,
+    scaleTolerance: 0.04,
+    maxNeighborSpread: 1.25,
+    maxDurationMs: 12 * 60 * 60 * 1000,
 };
 
 const sanitizeFilename = (name) => {
@@ -1077,16 +1083,56 @@ const isAliExpressIsolatedOutlier = (intervals, index, market) => {
     return true;
 };
 
+const isAmazonScaledOutlier = (intervals, index, market) => {
+    if (resolveMarket(market, intervals[index]?.pidKey) !== 'amazon') return false;
+    if (intervals.length < 2) return false;
+
+    const current = intervals[index];
+    const prev = intervals[index - 1];
+    const next = intervals[index + 1];
+    if (!current || (!prev && !next)) return false;
+
+    const currency = String(current.currency || '');
+    const neighbors = [prev, next].filter(Boolean);
+    if (neighbors.some((item) => String(item.currency || '') !== currency)) return false;
+
+    const currentPrice = Number(current.price);
+    const neighborPrices = neighbors.map((item) => Number(item.price));
+    if (![currentPrice, ...neighborPrices].every((value) => Number.isFinite(value) && value > 0)) return false;
+
+    const neighborMin = Math.min(...neighborPrices);
+    const neighborMax = Math.max(...neighborPrices);
+    if (neighborPrices.length > 1 && (neighborMax / neighborMin) > AMAZON_OUTLIER_CFG.maxNeighborSpread) return false;
+
+    const neighborMid = neighborPrices.reduce((sum, price) => sum + price, 0) / neighborPrices.length;
+    const scale = currentPrice / neighborMid;
+    const target = AMAZON_OUTLIER_CFG.expectedScale;
+    if (Math.abs(scale - target) > (target * AMAZON_OUTLIER_CFG.scaleTolerance)) return false;
+
+    const firstTs = toInt(current.firstTs, 0);
+    const lastTs = toInt(current.lastTs, firstTs);
+    const currentDuration = Math.max(0, lastTs - firstTs);
+    if (currentDuration > AMAZON_OUTLIER_CFG.maxDurationMs) return false;
+    return true;
+};
+
 const filterAliExpressNoisyIntervals = (rows, market) => {
     const intervals = sortIntervalsForPid(rows);
     if (resolveMarket(market, intervals[0]?.pidKey) !== 'aliexpress' || intervals.length < 3) return intervals;
     return intervals.filter((_, index) => !isAliExpressIsolatedOutlier(intervals, index, market));
 };
 
+const filterAmazonNoisyIntervals = (rows, market) => {
+    const intervals = sortIntervalsForPid(rows);
+    if (resolveMarket(market, intervals[0]?.pidKey) !== 'amazon' || intervals.length < 3) return intervals;
+    return intervals.filter((_, index) => !isAmazonScaledOutlier(intervals, index, market));
+};
+
 const filterIntervalsByMarketHeuristics = (rows, market) => {
     const intervals = sortIntervalsForPid(rows);
     const resolved = resolveMarket(market, intervals[0]?.pidKey);
     if (resolved === 'aliexpress') return filterAliExpressNoisyIntervals(intervals, market);
+    if (resolved === 'amazon') return filterAmazonNoisyIntervals(intervals, market);
     if (resolved !== 'wb' || intervals.length < 3) return intervals;
     return intervals.filter((_, index) => !isWbOutlierInterval(intervals, index, market));
 };
@@ -1778,7 +1824,7 @@ const openPriceHistoryEditor = async (payload = {}) => {
     const params = new URLSearchParams({ pidKey });
     const currency = normalizeCurrency(payload.currency || payload.preferredCurrency);
     if (currency) params.set('currency', currency);
-    const url = chrome.runtime.getURL(`history/history.html?${params.toString()}`);
+    const url = chrome.runtime.getURL(`build/history/history.html?${params.toString()}`);
     const width = Math.max(760, Math.min(1120, toInt(payload.width, 980)));
     const height = Math.max(520, Math.min(900, toInt(payload.height, 720)));
     const win = await windowsCreate({

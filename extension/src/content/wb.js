@@ -1,5 +1,5 @@
-import "../../content/mp-core.js";
-import "../../content/exporter/common.js";
-import "../../content/exporter/wb.js";
-import "../../content/price-monitor/common.js";
-import "../../content/price-monitor/wb.js";
+import "./mp-core.js";
+import "./exporter/common.js";
+import "./exporter/wb.js";
+import "./price-monitor/common.js";
+import "./price-monitor/wb.js";

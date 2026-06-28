@@ -1,5 +1,5 @@
-import "../../content/mp-core.js";
-import "../../content/exporter/common.js";
-import "../../content/exporter/ozon.js";
-import "../../content/price-monitor/common.js";
-import "../../content/price-monitor/ozon.js";
+import "./mp-core.js";
+import "./exporter/common.js";
+import "./exporter/ozon.js";
+import "./price-monitor/common.js";
+import "./price-monitor/ozon.js";

@@ -98,7 +98,7 @@
 Node.js-проект сборки находится внутри `extension/`, чтобы не смешивать его с сервером.
 
 - `cd extension && npm install` - ставит зависимости сборки и включает git hook через `prepare`.
-- `cd extension && npm run build:local` - пересобирает committed content bundles в `extension/content/*.js`. Эта команда запускается автоматически перед коммитом.
+- `cd extension && npm run build:local` - пересобирает committed artifacts в `extension/build/**`. Эта команда запускается автоматически перед коммитом.
 - `cd extension && npm run dev` - watch-режим для тех же локальных bundles.
 - `cd extension && npm run build` - собирает минифицированную release-папку вне репозитория: `../owb-tools-release` относительно корня проекта. Путь можно переопределить через `RELEASE_DIR`.
 
@@ -130,7 +130,7 @@ Node.js-проект сборки находится внутри `extension/`, 
 
 ## Важные технические детали
 
-- Сборка делается через `esbuild`: content scripts собираются в один файл на маркетплейс (`content/ozon.js`, `content/wb.js`, `content/aliexpress.js`) и хранятся в репозитории для `Load unpacked`.
+- Сборка делается через `esbuild`: исходники живут в `extension/src/**`, а `manifest.json` подключает generated-файлы из `extension/build/**`. Content scripts собираются в один файл на маркетплейс (`build/content/ozon.js`, `build/content/wb.js`, `build/content/aliexpress.js`, `build/content/amazon.js`) и хранятся в репозитории для `Load unpacked`.
 - `manifest.key` закрепляет extension ID для unpacked-установки. Не менять его без необходимости, иначе Chrome создаст новое хранилище расширения.
 - `pidKey` формат: `ozon:<id>`, `wb:<id>`, `aliexpress:<id>` или `amazon:<ASIN>`.
 - Последняя батч-сессия хранится в `chrome.storage.local` по ключу `owb-last-extract-session`.

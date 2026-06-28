@@ -1,0 +1,2362 @@
+"use strict";
+(() => {
+  // src/background/service-worker.js
+  var DEFAULT_DOWNLOAD_NAME = "export.txt";
+  var PRICE_DB = {
+    name: "owb-price-history-ext",
+    version: 1,
+    intervals: "intervals",
+    products: "products"
+  };
+  var CONFIG_KEYS = {
+    mode: "owb-default-sync-mode",
+    url: "owb-default-server-url",
+    cursor: "owb-default-sync-cursor",
+    pullCursor: "owb-sync-pull-cursor",
+    pullCursorId: "owb-sync-pull-cursor-id",
+    pushCursor: "owb-sync-push-cursor",
+    pushCursorKey: "owb-sync-push-cursor-key",
+    lastSyncTs: "owb-sync-last-ts"
+  };
+  var SYNC_CFG = {
+    requestTimeoutMs: 1800,
+    maxPushBatch: 800,
+    maxPullBatch: 1200,
+    maxSyncLoops: 12,
+    autoSyncCooldownMs: 15e3,
+    minFetchTtlMs: 2e4,
+    historyFetchTtlMs: 15e3
+  };
+  var DEFAULT_SERVER_URL = "http://127.0.0.1:8765";
+  var PRODUCT_SUMMARY_VERSION = 7;
+  var WB_OUTLIER_CFG = {
+    minNeighborRatio: 2.5,
+    maxNeighborSpread: 1.25,
+    maxDurationMs: 12 * 60 * 60 * 1e3,
+    maxRelativeDuration: 0.35
+  };
+  var ALI_OUTLIER_CFG = {
+    maxNeighborSpread: 1.25,
+    lowRatio: 0.65,
+    highRatio: 1.8,
+    minRelativeDelta: 0.35,
+    minAbsoluteDelta: 20,
+    minAbsoluteDeltaByCurrency: {
+      "$": 0.5,
+      "\u20AC": 0.5,
+      "\xA3": 0.5,
+      "\xA5": 50,
+      "\u058F": 200,
+      "\u20B8": 250,
+      "\u20BA": 15,
+      "\u20B4": 20,
+      "\u20B9": 40,
+      "\u20A9": 700
+    },
+    maxDurationMs: 45 * 60 * 1e3
+  };
+  var AMAZON_OUTLIER_CFG = {
+    expectedScale: 100,
+    scaleTolerance: 0.04,
+    maxNeighborSpread: 1.25,
+    maxDurationMs: 12 * 60 * 60 * 1e3
+  };
+  var sanitizeFilename = (name) => {
+    const base = String(name || DEFAULT_DOWNLOAD_NAME).trim() || DEFAULT_DOWNLOAD_NAME;
+    const safe = base.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").replace(/\s+/g, " ").trim();
+    return safe || DEFAULT_DOWNLOAD_NAME;
+  };
+  var asNumber = (value, fallback) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  };
+  var toInt = (value, fallback = 0) => {
+    const n = Math.trunc(Number(value));
+    return Number.isFinite(n) ? n : fallback;
+  };
+  var eq = (a, b) => Math.abs(Number(a) - Number(b)) < 1e-9;
+  var now = () => Date.now();
+  var priceNorm = (value) => Math.round(Number(value) * 1e4);
+  var normalizeCurrency = (value) => String(value || "").trim();
+  var sameCurrency = (a, b) => normalizeCurrency(a) === normalizeCurrency(b);
+  var currencyBucketKey = (value) => normalizeCurrency(value) || "__empty__";
+  var storageGet = (keys) => new Promise((resolve, reject) => {
+    chrome.storage.local.get(keys, (result) => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        reject(new Error(err.message || "Storage get failed"));
+        return;
+      }
+      resolve(result || {});
+    });
+  });
+  var storageSet = (payload) => new Promise((resolve, reject) => {
+    chrome.storage.local.set(payload, () => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        reject(new Error(err.message || "Storage set failed"));
+        return;
+      }
+      resolve(true);
+    });
+  });
+  var downloadFile = (options) => new Promise((resolve, reject) => {
+    chrome.downloads.download(options, (downloadId) => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        reject(new Error(err.message || "Download failed"));
+        return;
+      }
+      resolve(downloadId);
+    });
+  });
+  var handleDownloadText = async (message) => {
+    const filename = sanitizeFilename(message.name);
+    const text = String(message.text || "");
+    const url = `data:text/plain;charset=utf-8,${encodeURIComponent(text)}`;
+    const downloadId = await downloadFile({
+      url,
+      filename,
+      saveAs: false,
+      conflictAction: "uniquify"
+    });
+    return { ok: true, downloadId };
+  };
+  var handleJsonRequest = async (message) => {
+    const method = String(message.method || "GET").toUpperCase();
+    const url = String(message.url || "").trim();
+    if (!/^https?:\/\//i.test(url)) return { ok: false, error: "Invalid URL" };
+    const timeoutMs = Math.max(300, asNumber(message.timeout, 2500));
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const hasBody = message.body !== null && message.body !== void 0;
+      const res = await fetch(url, {
+        method,
+        headers: hasBody ? { "Content-Type": "application/json" } : {},
+        body: hasBody ? JSON.stringify(message.body) : void 0,
+        signal: ctrl.signal,
+        cache: "no-store",
+        credentials: "omit"
+      });
+      const text = await res.text();
+      if (!res.ok) return { ok: false, error: `HTTP ${res.status}`, status: res.status, text };
+      let data = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch (_) {
+        data = null;
+      }
+      return { ok: true, data, status: res.status };
+    } catch (err) {
+      const timeout = err && err.name === "AbortError";
+      return { ok: false, error: timeout ? "timeout" : String(err && err.message ? err.message : err) };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  var trimServerUrl = (value) => String(value || "").trim().replace(/\/+$/, "");
+  var makeServerUrl = (baseUrl, path) => `${trimServerUrl(baseUrl)}${path.startsWith("/") ? path : `/${path}`}`;
+  var serverFetchJson = async (baseUrl, path, options = {}) => {
+    const url = makeServerUrl(baseUrl, path);
+    if (!/^https?:\/\//i.test(url)) return { ok: false, error: "invalid-server-url" };
+    const method = String(options.method || "GET").toUpperCase();
+    const timeoutMs = Math.max(350, asNumber(options.timeoutMs, SYNC_CFG.requestTimeoutMs));
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const hasBody = options.body !== null && options.body !== void 0;
+      const response = await fetch(url, {
+        method,
+        headers: hasBody ? { "Content-Type": "application/json" } : {},
+        body: hasBody ? JSON.stringify(options.body) : void 0,
+        signal: ctrl.signal,
+        cache: "no-store",
+        credentials: "omit"
+      });
+      const text = await response.text();
+      let data = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch (_) {
+        data = null;
+      }
+      if (!response.ok) return { ok: false, error: `HTTP ${response.status}`, status: response.status, data };
+      return { ok: true, status: response.status, data };
+    } catch (err) {
+      const timeout = err && err.name === "AbortError";
+      return { ok: false, error: timeout ? "timeout" : String(err && err.message ? err.message : err) };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  var idbReq = (request) => new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  var txDone = (tx) => new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+  var ensurePriceDbSchema = (db, tx) => {
+    const hasStore = (name) => db.objectStoreNames.contains(name);
+    const getStore = (name) => {
+      try {
+        return tx ? tx.objectStore(name) : null;
+      } catch (_) {
+        return null;
+      }
+    };
+    const hasIndex = (store, name) => {
+      try {
+        return !!store.indexNames && Array.from(store.indexNames).includes(name);
+      } catch (_) {
+        return false;
+      }
+    };
+    const ensureIndex = (store, name, keyPath) => {
+      if (!store) return;
+      if (hasIndex(store, name)) return;
+      store.createIndex(name, keyPath, { unique: false });
+    };
+    if (!hasStore(PRICE_DB.intervals)) {
+      const store = db.createObjectStore(PRICE_DB.intervals, { keyPath: "key" });
+      store.createIndex("byPidFirst", ["pidKey", "firstTs"], { unique: false });
+      store.createIndex("byPidLast", ["pidKey", "lastTs"], { unique: false });
+      store.createIndex("byUpdated", "updatedAt", { unique: false });
+    } else {
+      const store = getStore(PRICE_DB.intervals);
+      ensureIndex(store, "byPidFirst", ["pidKey", "firstTs"]);
+      ensureIndex(store, "byPidLast", ["pidKey", "lastTs"]);
+      ensureIndex(store, "byUpdated", "updatedAt");
+    }
+    if (!hasStore(PRICE_DB.products)) {
+      const store = db.createObjectStore(PRICE_DB.products, { keyPath: "pidKey" });
+      store.createIndex("byUpdated", "updatedAt", { unique: false });
+    } else {
+      ensureIndex(getStore(PRICE_DB.products), "byUpdated", "updatedAt");
+    }
+  };
+  var priceDbPromise = null;
+  var openPriceDb = () => {
+    if (priceDbPromise) return priceDbPromise;
+    priceDbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open(PRICE_DB.name, PRICE_DB.version);
+      req.onupgradeneeded = () => {
+        ensurePriceDbSchema(req.result, req.transaction);
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    }).catch((err) => {
+      priceDbPromise = null;
+      throw err;
+    });
+    return priceDbPromise;
+  };
+  var normalizePriceRecord = (raw) => {
+    if (!raw) return null;
+    const pidKey = String(raw.pidKey || "").trim();
+    const price = Number(raw.price);
+    if (!pidKey || !Number.isFinite(price)) return null;
+    const ts = toInt(raw.ts, now());
+    const pid = String(raw.pid || "");
+    const currency = String(raw.currency || "");
+    const market = String(raw.market || pidKey.split(":")[0] || "");
+    return { pidKey, pid, price, currency, ts, market };
+  };
+  var normalizeIntervalRecord = (raw) => {
+    if (!raw) return null;
+    const pidKey = String(raw.pidKey || "").trim();
+    const price = Number(raw.price);
+    const firstTs = toInt(raw.firstTs != null ? raw.firstTs : raw.ts, NaN);
+    const lastTs = toInt(raw.lastTs != null ? raw.lastTs : raw.ts, NaN);
+    if (!pidKey || !Number.isFinite(price) || !Number.isFinite(firstTs) || !Number.isFinite(lastTs)) return null;
+    return {
+      pidKey,
+      pid: String(raw.pid || ""),
+      currency: String(raw.currency || ""),
+      price,
+      firstTs: Math.min(firstTs, lastTs),
+      lastTs: Math.max(firstTs, lastTs)
+    };
+  };
+  var makeIntervalKey = (record) => `${record.pidKey}:${record.ts}:${priceNorm(record.price)}:${Math.random().toString(36).slice(2, 9)}`;
+  var capturePriceBatch = async (records) => {
+    const clean = (Array.isArray(records) ? records : []).map(normalizePriceRecord).filter(Boolean).sort((a, b) => a.ts - b.ts);
+    if (!clean.length) return { captured: 0, created: 0, touched: 0, products: 0 };
+    const db = await openPriceDb();
+    const tx = db.transaction([PRICE_DB.intervals, PRICE_DB.products], "readwrite");
+    const intervalsStore = tx.objectStore(PRICE_DB.intervals);
+    const productsStore = tx.objectStore(PRICE_DB.products);
+    const stateCache = /* @__PURE__ */ new Map();
+    const intervalCache = /* @__PURE__ */ new Map();
+    const dirtyStates = /* @__PURE__ */ new Set();
+    const dirtyIntervals = /* @__PURE__ */ new Set();
+    let created = 0;
+    let touched = 0;
+    const getState = async (pidKey) => {
+      if (stateCache.has(pidKey)) return stateCache.get(pidKey);
+      const state = await idbReq(productsStore.get(pidKey));
+      stateCache.set(pidKey, state || null);
+      return state || null;
+    };
+    const getInterval = async (key) => {
+      if (!key) return null;
+      if (intervalCache.has(key)) return intervalCache.get(key);
+      const interval = await idbReq(intervalsStore.get(key));
+      intervalCache.set(key, interval || null);
+      return interval || null;
+    };
+    for (const record of clean) {
+      const touchedAt = now();
+      let state = await getState(record.pidKey);
+      let tailInterval = null;
+      if (state && state.lastIntervalKey && eq(state.lastPrice, record.price) && String(state.lastCurrency || "") === record.currency) {
+        tailInterval = await getInterval(state.lastIntervalKey);
+      }
+      if (tailInterval) {
+        tailInterval.lastTs = Math.max(toInt(tailInterval.lastTs, record.ts), record.ts);
+        tailInterval.updatedAt = touchedAt;
+        intervalCache.set(tailInterval.key, tailInterval);
+        dirtyIntervals.add(tailInterval.key);
+        touched += 1;
+        state.lastTs = Math.max(toInt(state.lastTs, record.ts), record.ts);
+        state.updatedAt = touchedAt;
+        state.pid = record.pid || state.pid || "";
+        if (state.minIntervalKey === tailInterval.key) {
+          state.minLastTs = Math.max(toInt(state.minLastTs, tailInterval.lastTs), tailInterval.lastTs);
+        }
+        stateCache.set(record.pidKey, state);
+        dirtyStates.add(record.pidKey);
+        continue;
+      }
+      const key = makeIntervalKey(record);
+      const interval = {
+        key,
+        pidKey: record.pidKey,
+        pid: record.pid,
+        market: record.market,
+        price: record.price,
+        priceNorm: priceNorm(record.price),
+        currency: record.currency,
+        firstTs: record.ts,
+        lastTs: record.ts,
+        updatedAt: touchedAt
+      };
+      intervalCache.set(key, interval);
+      dirtyIntervals.add(key);
+      created += 1;
+      if (!state) {
+        state = {
+          pidKey: record.pidKey,
+          pid: record.pid || "",
+          market: record.market || "",
+          createdAt: touchedAt
+        };
+      }
+      state.lastIntervalKey = key;
+      state.lastPrice = record.price;
+      state.lastCurrency = record.currency;
+      state.lastTs = record.ts;
+      state.updatedAt = touchedAt;
+      if (!Number.isFinite(Number(state.minPrice)) || record.price < Number(state.minPrice)) {
+        state.minPrice = record.price;
+        state.minCurrency = record.currency;
+        state.minIntervalKey = key;
+        state.minFirstTs = record.ts;
+        state.minLastTs = record.ts;
+      } else if (eq(record.price, Number(state.minPrice))) {
+        state.minFirstTs = state.minFirstTs ? Math.min(state.minFirstTs, record.ts) : record.ts;
+        state.minLastTs = state.minLastTs ? Math.max(state.minLastTs, record.ts) : record.ts;
+      }
+      stateCache.set(record.pidKey, state);
+      dirtyStates.add(record.pidKey);
+    }
+    for (const key of dirtyIntervals) {
+      const interval = intervalCache.get(key);
+      if (interval) intervalsStore.put(interval);
+    }
+    for (const pidKey of dirtyStates) {
+      const state = stateCache.get(pidKey);
+      if (state) productsStore.put(state);
+    }
+    await txDone(tx);
+    await rebuildProductSummaries([...dirtyStates]);
+    return {
+      captured: clean.length,
+      created,
+      touched,
+      products: dirtyStates.size
+    };
+  };
+  var getIntervalsByPid = async (pidKey, limit = 2e3) => {
+    const cleanPidKey = String(pidKey || "").trim();
+    if (!cleanPidKey) return [];
+    const db = await openPriceDb();
+    const tx = db.transaction(PRICE_DB.intervals, "readonly");
+    const store = tx.objectStore(PRICE_DB.intervals);
+    const idx = store.index("byPidFirst");
+    const range = IDBKeyRange.bound([cleanPidKey, 0], [cleanPidKey, Number.MAX_SAFE_INTEGER]);
+    const out = [];
+    await new Promise((resolve, reject) => {
+      const req = idx.openCursor(range, "next");
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor || out.length >= limit) {
+          resolve(true);
+          return;
+        }
+        out.push(cursor.value);
+        cursor.continue();
+      };
+      req.onerror = () => reject(req.error);
+    });
+    await txDone(tx);
+    return out;
+  };
+  var cloneStateMinRecord = (pidKey, state, entry) => {
+    if (!entry || !Number.isFinite(Number(entry.price))) return null;
+    return {
+      pidKey,
+      pid: String(state?.pid || ""),
+      price: Number(entry.price),
+      currency: normalizeCurrency(entry.currency),
+      firstTs: toInt(entry.firstTs, 0),
+      lastTs: toInt(entry.lastTs, 0)
+    };
+  };
+  var pickCurrencyMinFromState = (state, preferredCurrency = "") => {
+    if (!state || typeof state !== "object") return null;
+    const currencyMins = state.currencyMins && typeof state.currencyMins === "object" ? state.currencyMins : null;
+    const cleanPreferred = normalizeCurrency(preferredCurrency);
+    if (cleanPreferred && currencyMins) {
+      return currencyMins[currencyBucketKey(cleanPreferred)] || null;
+    }
+    if (cleanPreferred) return null;
+    if (currencyMins) {
+      const lastEntry = currencyMins[currencyBucketKey(state.lastCurrency)] || null;
+      if (lastEntry) return lastEntry;
+      let newest = null;
+      Object.values(currencyMins).forEach((entry) => {
+        if (!entry || !Number.isFinite(Number(entry.price))) return;
+        if (!newest) {
+          newest = entry;
+          return;
+        }
+        const entryTs = toInt(entry.lastSeenTs, toInt(entry.lastTs, 0));
+        const newestTs = toInt(newest.lastSeenTs, toInt(newest.lastTs, 0));
+        if (entryTs > newestTs) {
+          newest = entry;
+          return;
+        }
+        if (entryTs === newestTs && Number(entry.price) < Number(newest.price)) newest = entry;
+      });
+      if (newest) return newest;
+    }
+    if (!Number.isFinite(Number(state.minPrice))) return null;
+    return {
+      price: Number(state.minPrice),
+      currency: normalizeCurrency(state.minCurrency),
+      firstTs: toInt(state.minFirstTs, 0),
+      lastTs: toInt(state.minLastTs, 0),
+      intervalKey: String(state.minIntervalKey || ""),
+      lastSeenTs: toInt(state.lastTs, 0)
+    };
+  };
+  var getMinBatch = async (pidKeys, preferredCurrencies = {}) => {
+    const keys = [...new Set((Array.isArray(pidKeys) ? pidKeys : []).map((k) => String(k || "").trim()).filter(Boolean))];
+    if (!keys.length) return {};
+    await ensureProductSummaries(keys);
+    const db = await openPriceDb();
+    const tx = db.transaction(PRICE_DB.products, "readonly");
+    const store = tx.objectStore(PRICE_DB.products);
+    const out = {};
+    for (const pidKey of keys) {
+      const state = await idbReq(store.get(pidKey));
+      const preferredCurrency = normalizeCurrency(preferredCurrencies?.[pidKey]);
+      const entry = pickCurrencyMinFromState(state, preferredCurrency);
+      const record = cloneStateMinRecord(pidKey, state, entry);
+      if (!record) continue;
+      out[pidKey] = record;
+    }
+    await txDone(tx);
+    return out;
+  };
+  var getIntervalsUpdatedSince = async (sinceTs = 0, sinceKey = "", limit = SYNC_CFG.maxPushBatch) => {
+    const since = Math.max(0, toInt(sinceTs, 0));
+    const sinceRowKey = String(sinceKey || "");
+    const max = Math.max(1, Math.min(5e3, toInt(limit, SYNC_CFG.maxPushBatch)));
+    const db = await openPriceDb();
+    const tx = db.transaction(PRICE_DB.intervals, "readonly");
+    const store = tx.objectStore(PRICE_DB.intervals);
+    const idx = store.index("byUpdated");
+    const range = IDBKeyRange.lowerBound(since);
+    const out = [];
+    await new Promise((resolve, reject) => {
+      const req = idx.openCursor(range, "next");
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor || out.length >= max) {
+          resolve(true);
+          return;
+        }
+        const row = cursor.value || {};
+        const updatedTs = toInt(row.updatedAt, 0);
+        const rowKey = String(row.key || "");
+        if (updatedTs < since || updatedTs === since && sinceRowKey && rowKey <= sinceRowKey) {
+          cursor.continue();
+          return;
+        }
+        out.push({
+          key: rowKey,
+          pidKey: String(row.pidKey || ""),
+          pid: String(row.pid || ""),
+          market: String(row.market || ""),
+          price: Number(row.price),
+          currency: String(row.currency || ""),
+          firstTs: toInt(row.firstTs, 0),
+          lastTs: toInt(row.lastTs, 0),
+          updatedTs
+        });
+        cursor.continue();
+      };
+      req.onerror = () => reject(req.error);
+    });
+    await txDone(tx);
+    return out.filter((row) => row.key && row.pidKey && Number.isFinite(row.price) && row.firstTs > 0 && row.lastTs > 0);
+  };
+  var normalizeSyncInterval = (raw) => {
+    if (!raw) return null;
+    const pidKey = String(raw.pidKey || raw.pid_key || "").trim();
+    if (!pidKey) return null;
+    const price = Number(raw.price);
+    if (!Number.isFinite(price)) return null;
+    const firstTs = toInt(raw.firstTs != null ? raw.firstTs : raw.first_ts, NaN);
+    const lastTs = toInt(raw.lastTs != null ? raw.lastTs : raw.last_ts, NaN);
+    if (!Number.isFinite(firstTs) || !Number.isFinite(lastTs)) return null;
+    const minTs = Math.min(firstTs, lastTs);
+    const maxTs = Math.max(firstTs, lastTs);
+    return {
+      pidKey,
+      pid: String(raw.pid || ""),
+      market: String(raw.market || pidKey.split(":")[0] || ""),
+      price,
+      currency: String(raw.currency || ""),
+      firstTs: minTs,
+      lastTs: maxTs,
+      updatedAt: Math.max(toInt(raw.updatedAt != null ? raw.updatedAt : raw.updatedTs, 0), 0)
+    };
+  };
+  var makeIntervalKeyFromRange = (record) => `${record.pidKey}:${record.firstTs}:${priceNorm(record.price)}:${Math.random().toString(36).slice(2, 9)}`;
+  var upsertIntervalsFromSync = async (records) => {
+    const normalized = (Array.isArray(records) ? records : []).map(normalizeSyncInterval).filter(Boolean).sort((a, b) => {
+      const byPid = String(a.pidKey).localeCompare(String(b.pidKey));
+      if (byPid !== 0) return byPid;
+      return toInt(a.firstTs, 0) - toInt(b.firstTs, 0);
+    });
+    if (!normalized.length) return { accepted: 0, inserted: 0, merged: 0, updated: 0, products: 0 };
+    const db = await openPriceDb();
+    const tx = db.transaction(PRICE_DB.intervals, "readwrite");
+    const intervalsStore = tx.objectStore(PRICE_DB.intervals);
+    const idxByPid = intervalsStore.index("byPidFirst");
+    const intervalsByPid = /* @__PURE__ */ new Map();
+    const affectedPidKeys = /* @__PURE__ */ new Set();
+    let inserted = 0;
+    let merged = 0;
+    let updated = 0;
+    const loadPidIntervals = async (pidKey) => {
+      if (intervalsByPid.has(pidKey)) return intervalsByPid.get(pidKey);
+      const range = IDBKeyRange.bound([pidKey, 0], [pidKey, Number.MAX_SAFE_INTEGER]);
+      const list = await idbReq(idxByPid.getAll(range));
+      const rows = (Array.isArray(list) ? list : []).filter(Boolean).sort((a, b) => {
+        const byFirst = toInt(a.firstTs, 0) - toInt(b.firstTs, 0);
+        if (byFirst !== 0) return byFirst;
+        return toInt(a.lastTs, 0) - toInt(b.lastTs, 0);
+      });
+      intervalsByPid.set(pidKey, rows);
+      return rows;
+    };
+    const isOverlap = (base, item) => {
+      if (!base || !item) return false;
+      return toInt(item.lastTs, 0) >= toInt(base.firstTs, 0) - 1 && toInt(item.firstTs, 0) <= toInt(base.lastTs, 0) + 1;
+    };
+    for (const rec of normalized) {
+      const list = await loadPidIntervals(rec.pidKey);
+      const samePrice = list.filter((item) => eq(item.price, rec.price) && String(item.currency || "") === String(rec.currency || ""));
+      const overlaps = samePrice.filter((item) => isOverlap(rec, item));
+      const touchTs = Math.max(toInt(rec.updatedAt, 0), now());
+      if (!overlaps.length) {
+        const row = {
+          key: makeIntervalKeyFromRange(rec),
+          pidKey: rec.pidKey,
+          pid: rec.pid || "",
+          market: rec.market || rec.pidKey.split(":")[0] || "",
+          price: rec.price,
+          priceNorm: priceNorm(rec.price),
+          currency: rec.currency || "",
+          firstTs: rec.firstTs,
+          lastTs: rec.lastTs,
+          updatedAt: touchTs
+        };
+        intervalsStore.put(row);
+        list.push(row);
+        list.sort((a, b) => toInt(a.firstTs, 0) - toInt(b.firstTs, 0));
+        inserted += 1;
+      } else {
+        const keep = overlaps[0];
+        let changed = false;
+        let mergedFirst = Math.min(toInt(rec.firstTs, 0), ...overlaps.map((item) => toInt(item.firstTs, 0)));
+        let mergedLast = Math.max(toInt(rec.lastTs, 0), ...overlaps.map((item) => toInt(item.lastTs, 0)));
+        if (mergedFirst !== toInt(keep.firstTs, 0)) {
+          keep.firstTs = mergedFirst;
+          changed = true;
+        }
+        if (mergedLast !== toInt(keep.lastTs, 0)) {
+          keep.lastTs = mergedLast;
+          changed = true;
+        }
+        if (rec.pid && !keep.pid) {
+          keep.pid = rec.pid;
+          changed = true;
+        }
+        if (!keep.market) {
+          keep.market = rec.market || rec.pidKey.split(":")[0] || "";
+          changed = true;
+        }
+        if (touchTs > toInt(keep.updatedAt, 0)) {
+          keep.updatedAt = touchTs;
+          changed = true;
+        }
+        if (changed) {
+          intervalsStore.put(keep);
+          updated += 1;
+        }
+        const remove = overlaps.slice(1);
+        if (remove.length) {
+          remove.forEach((item) => {
+            intervalsStore.delete(item.key);
+            const idx = list.findIndex((it) => it.key === item.key);
+            if (idx >= 0) list.splice(idx, 1);
+          });
+          merged += remove.length;
+        }
+        let chainMerged = true;
+        while (chainMerged) {
+          chainMerged = false;
+          const chained = list.filter((item) => item.key !== keep.key && eq(item.price, keep.price) && String(item.currency || "") === String(keep.currency || "") && isOverlap(keep, item));
+          if (!chained.length) break;
+          chained.forEach((item) => {
+            keep.firstTs = Math.min(toInt(keep.firstTs, 0), toInt(item.firstTs, 0));
+            keep.lastTs = Math.max(toInt(keep.lastTs, 0), toInt(item.lastTs, 0));
+            keep.updatedAt = Math.max(toInt(keep.updatedAt, 0), toInt(item.updatedAt, 0), touchTs);
+            if (!keep.pid && item.pid) keep.pid = item.pid;
+            intervalsStore.delete(item.key);
+            const idx = list.findIndex((it) => it.key === item.key);
+            if (idx >= 0) list.splice(idx, 1);
+          });
+          intervalsStore.put(keep);
+          merged += chained.length;
+          chainMerged = true;
+        }
+        const keepIdx = list.findIndex((it) => it.key === keep.key);
+        if (keepIdx >= 0) list[keepIdx] = keep;
+        else list.push(keep);
+        list.sort((a, b) => toInt(a.firstTs, 0) - toInt(b.firstTs, 0));
+      }
+      affectedPidKeys.add(rec.pidKey);
+    }
+    await txDone(tx);
+    await rebuildProductSummaries([...affectedPidKeys]);
+    return {
+      accepted: normalized.length,
+      inserted,
+      merged,
+      updated,
+      products: affectedPidKeys.size
+    };
+  };
+  var resetPriceHistoryByPid = async (pidKey) => {
+    const cleanPidKey = String(pidKey || "").trim();
+    if (!cleanPidKey) return { pidKey: "", deletedIntervals: 0, deletedProduct: false };
+    const db = await openPriceDb();
+    const tx = db.transaction([PRICE_DB.intervals, PRICE_DB.products], "readwrite");
+    const intervalsStore = tx.objectStore(PRICE_DB.intervals);
+    const productsStore = tx.objectStore(PRICE_DB.products);
+    const idx = intervalsStore.index("byPidFirst");
+    const range = IDBKeyRange.bound([cleanPidKey, 0], [cleanPidKey, Number.MAX_SAFE_INTEGER]);
+    let deletedIntervals = 0;
+    let deletedProduct = false;
+    const deleteIntervalsPromise = new Promise((resolve, reject) => {
+      const req = idx.openCursor(range, "next");
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) {
+          resolve(true);
+          return;
+        }
+        intervalsStore.delete(cursor.primaryKey);
+        deletedIntervals += 1;
+        cursor.continue();
+      };
+      req.onerror = () => reject(req.error);
+    });
+    const deleteProductPromise = new Promise((resolve, reject) => {
+      const req = productsStore.openCursor(IDBKeyRange.only(cleanPidKey), "next");
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) {
+          resolve(true);
+          return;
+        }
+        productsStore.delete(cursor.primaryKey);
+        deletedProduct = true;
+        resolve(true);
+      };
+      req.onerror = () => reject(req.error);
+    });
+    await Promise.all([deleteIntervalsPromise, deleteProductPromise]);
+    await txDone(tx);
+    return { pidKey: cleanPidKey, deletedIntervals, deletedProduct };
+  };
+  var normalizeDeleteIntervalPayload = (payload = {}) => {
+    const pidKey = String(payload.pidKey || "").trim();
+    if (!pidKey) throw new Error("pidKey is required");
+    const key = String(payload.key || "").trim();
+    const price = Number(payload.price);
+    const firstTs = toInt(payload.firstTs, NaN);
+    const lastTs = toInt(payload.lastTs, NaN);
+    const currency = String(payload.currency || "");
+    return {
+      pidKey,
+      key,
+      price,
+      currency,
+      firstTs: Math.min(firstTs, lastTs),
+      lastTs: Math.max(firstTs, lastTs),
+      hasExactRange: Number.isFinite(price) && Number.isFinite(firstTs) && Number.isFinite(lastTs)
+    };
+  };
+  var deletePriceIntervalLocal = async (payload = {}) => {
+    const target = normalizeDeleteIntervalPayload(payload);
+    if (!target.key && !target.hasExactRange) {
+      throw new Error("interval key or exact interval fields are required");
+    }
+    const db = await openPriceDb();
+    const tx = db.transaction(PRICE_DB.intervals, "readwrite");
+    const store = tx.objectStore(PRICE_DB.intervals);
+    const deleted = [];
+    if (target.key) {
+      const row = await idbReq(store.get(target.key));
+      if (row && String(row.pidKey || "") === target.pidKey) {
+        store.delete(target.key);
+        deleted.push(row);
+      }
+    }
+    if (!deleted.length && target.hasExactRange) {
+      const idx = store.index("byPidFirst");
+      const range = IDBKeyRange.bound([target.pidKey, 0], [target.pidKey, Number.MAX_SAFE_INTEGER]);
+      const rows = await idbReq(idx.getAll(range));
+      (Array.isArray(rows) ? rows : []).forEach((row) => {
+        if (!row) return;
+        if (!eq(row.price, target.price)) return;
+        if (String(row.currency || "") !== target.currency) return;
+        if (toInt(row.firstTs, 0) !== target.firstTs || toInt(row.lastTs, 0) !== target.lastTs) return;
+        store.delete(row.key);
+        deleted.push(row);
+      });
+    }
+    await txDone(tx);
+    if (deleted.length) await rebuildProductSummaries([target.pidKey]);
+    return {
+      pidKey: target.pidKey,
+      deletedIntervals: deleted.length,
+      interval: deleted[0] || (target.hasExactRange ? {
+        pidKey: target.pidKey,
+        price: target.price,
+        currency: target.currency,
+        firstTs: target.firstTs,
+        lastTs: target.lastTs
+      } : null)
+    };
+  };
+  var deleteServerInterval = async (cfg, interval) => {
+    if (!cfg || cfg.mode !== "sync" || !cfg.serverUrl || !interval) return { ok: true, skipped: true };
+    const response = await serverFetchJson(cfg.serverUrl, "/api/intervals/delete", {
+      method: "POST",
+      timeoutMs: Math.max(SYNC_CFG.requestTimeoutMs, 3e3),
+      body: {
+        pidKey: interval.pidKey,
+        price: interval.price,
+        currency: interval.currency || "",
+        firstTs: interval.firstTs,
+        lastTs: interval.lastTs
+      }
+    });
+    if (!response.ok || response.data?.status !== "ok") {
+      return { ok: false, error: response.error || response.data?.error || "server-delete-failed" };
+    }
+    return {
+      ok: true,
+      deletedIntervals: Number(response.data?.deletedIntervals) || 0
+    };
+  };
+  var deleteServerHistoryByPid = async (cfg, pidKey) => {
+    if (!cfg || cfg.mode !== "sync" || !cfg.serverUrl || !pidKey) return { ok: true, skipped: true };
+    const response = await serverFetchJson(cfg.serverUrl, "/api/history/delete", {
+      method: "POST",
+      timeoutMs: Math.max(SYNC_CFG.requestTimeoutMs, 3e3),
+      body: { pidKey }
+    });
+    if (!response.ok || response.data?.status !== "ok") {
+      return { ok: false, error: response.error || response.data?.error || "server-history-delete-failed" };
+    }
+    return {
+      ok: true,
+      deletedIntervals: Number(response.data?.deletedIntervals) || 0
+    };
+  };
+  var deletePriceInterval = async (payload = {}) => {
+    const local = await deletePriceIntervalLocal(payload);
+    const cfg = await loadSyncConfig();
+    const server = await deleteServerInterval(cfg, local.interval).catch((err) => ({
+      ok: false,
+      error: String(err && err.message ? err.message : err)
+    }));
+    if (server.ok !== false) {
+      SYNC_STATE.historyFetchedAt.delete(local.pidKey);
+      SYNC_STATE.minFetchedAt.delete(local.pidKey);
+    }
+    return { ...local, server };
+  };
+  var resetMergedPriceHistoryByPid = async (pidKey) => {
+    const cleanPidKey = String(pidKey || "").trim();
+    const local = await resetPriceHistoryByPid(cleanPidKey);
+    const cfg = await loadSyncConfig();
+    const server = await deleteServerHistoryByPid(cfg, cleanPidKey).catch((err) => ({
+      ok: false,
+      error: String(err && err.message ? err.message : err)
+    }));
+    if (server.ok !== false) {
+      SYNC_STATE.historyFetchedAt.delete(cleanPidKey);
+      SYNC_STATE.minFetchedAt.delete(cleanPidKey);
+    }
+    return { ...local, server };
+  };
+  var resetPriceHistoryByMarket = async (market) => {
+    const cleanMarket = String(market || "").trim().toLowerCase();
+    if (!["ozon", "wb", "aliexpress", "amazon"].includes(cleanMarket)) {
+      throw new Error("Unknown market");
+    }
+    const prefix = `${cleanMarket}:`;
+    const db = await openPriceDb();
+    const tx = db.transaction([PRICE_DB.intervals, PRICE_DB.products], "readwrite");
+    const intervalsStore = tx.objectStore(PRICE_DB.intervals);
+    const productsStore = tx.objectStore(PRICE_DB.products);
+    let deletedIntervals = 0;
+    let deletedProducts = 0;
+    const deleteIntervalsPromise = new Promise((resolve, reject) => {
+      const idx = intervalsStore.index("byPidFirst");
+      const range = IDBKeyRange.bound([prefix, 0], [`${prefix}\uFFFF`, Number.MAX_SAFE_INTEGER]);
+      const req = idx.openCursor(range, "next");
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) {
+          resolve(true);
+          return;
+        }
+        intervalsStore.delete(cursor.primaryKey);
+        deletedIntervals += 1;
+        cursor.continue();
+      };
+      req.onerror = () => reject(req.error);
+    });
+    const deleteProductsPromise = new Promise((resolve, reject) => {
+      const range = IDBKeyRange.bound(prefix, `${prefix}\uFFFF`);
+      const req = productsStore.openCursor(range, "next");
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) {
+          resolve(true);
+          return;
+        }
+        productsStore.delete(cursor.primaryKey);
+        deletedProducts += 1;
+        cursor.continue();
+      };
+      req.onerror = () => reject(req.error);
+    });
+    await Promise.all([deleteIntervalsPromise, deleteProductsPromise]);
+    await txDone(tx);
+    return { market: cleanMarket, deletedIntervals, deletedProducts };
+  };
+  var readNewestByIndex = (store, indexName, limit = 20) => new Promise((resolve, reject) => {
+    const out = [];
+    const idx = store.index(indexName);
+    const req = idx.openCursor(null, "prev");
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor || out.length >= limit) {
+        resolve(out);
+        return;
+      }
+      out.push(cursor.value);
+      cursor.continue();
+    };
+    req.onerror = () => reject(req.error);
+  });
+  var resolveMarket = (value, pidKey = "") => {
+    const direct = String(value || "").trim().toLowerCase();
+    if (direct === "ozon" || direct === "wb" || direct === "aliexpress" || direct === "amazon") return direct;
+    const prefix = String(pidKey || "").split(":")[0].trim().toLowerCase();
+    if (prefix === "ozon" || prefix === "wb" || prefix === "aliexpress" || prefix === "amazon") return prefix;
+    return "unknown";
+  };
+  var sortIntervalsForPid = (rows) => [...Array.isArray(rows) ? rows : []].filter(Boolean).sort((a, b) => {
+    const byFirst = toInt(a.firstTs, 0) - toInt(b.firstTs, 0);
+    if (byFirst !== 0) return byFirst;
+    const byLast = toInt(a.lastTs, 0) - toInt(b.lastTs, 0);
+    if (byLast !== 0) return byLast;
+    return String(a.key || "").localeCompare(String(b.key || ""));
+  });
+  var pickLatestInterval = (rows) => {
+    const list = Array.isArray(rows) ? rows : [];
+    if (!list.length) return null;
+    return list.slice().sort((a, b) => {
+      const byLast = toInt(a.lastTs, 0) - toInt(b.lastTs, 0);
+      if (byLast !== 0) return byLast;
+      const byFirst = toInt(a.firstTs, 0) - toInt(b.firstTs, 0);
+      if (byFirst !== 0) return byFirst;
+      return String(a.key || "").localeCompare(String(b.key || ""));
+    }).pop() || null;
+  };
+  var isWbOutlierInterval = (intervals, index, market) => {
+    if (resolveMarket(market, intervals[index]?.pidKey) !== "wb") return false;
+    if (index <= 0 || index >= intervals.length - 1) return false;
+    const current = intervals[index];
+    const prev = intervals[index - 1];
+    const next = intervals[index + 1];
+    if (!current || !prev || !next) return false;
+    const currency = String(current.currency || "");
+    if (String(prev.currency || "") !== currency || String(next.currency || "") !== currency) return false;
+    const currentPrice = Number(current.price);
+    const prevPrice = Number(prev.price);
+    const nextPrice = Number(next.price);
+    if (![currentPrice, prevPrice, nextPrice].every((value) => Number.isFinite(value) && value > 0)) return false;
+    if (!(currentPrice < prevPrice && currentPrice < nextPrice)) return false;
+    const neighborMin = Math.min(prevPrice, nextPrice);
+    const neighborMax = Math.max(prevPrice, nextPrice);
+    if (neighborMin / currentPrice < WB_OUTLIER_CFG.minNeighborRatio) return false;
+    if (neighborMax / neighborMin > WB_OUTLIER_CFG.maxNeighborSpread) return false;
+    const firstTs = toInt(current.firstTs, 0);
+    const lastTs = toInt(current.lastTs, firstTs);
+    const prevDuration = Math.max(0, toInt(prev.lastTs, 0) - toInt(prev.firstTs, 0));
+    const nextDuration = Math.max(0, toInt(next.lastTs, 0) - toInt(next.firstTs, 0));
+    const currentDuration = Math.max(0, lastTs - firstTs);
+    const neighborDuration = Math.max(prevDuration, nextDuration);
+    if (currentDuration > WB_OUTLIER_CFG.maxDurationMs) return false;
+    if (neighborDuration > 0 && currentDuration > neighborDuration * WB_OUTLIER_CFG.maxRelativeDuration) return false;
+    return true;
+  };
+  var isAliExpressIsolatedOutlier = (intervals, index, market) => {
+    if (resolveMarket(market, intervals[index]?.pidKey) !== "aliexpress") return false;
+    if (index <= 0 || index >= intervals.length - 1) return false;
+    const current = intervals[index];
+    const prev = intervals[index - 1];
+    const next = intervals[index + 1];
+    if (!current || !prev || !next) return false;
+    const currency = String(current.currency || "");
+    if (String(prev.currency || "") !== currency || String(next.currency || "") !== currency) return false;
+    const currentPrice = Number(current.price);
+    const prevPrice = Number(prev.price);
+    const nextPrice = Number(next.price);
+    if (![currentPrice, prevPrice, nextPrice].every((value) => Number.isFinite(value) && value > 0)) return false;
+    const neighborMin = Math.min(prevPrice, nextPrice);
+    const neighborMax = Math.max(prevPrice, nextPrice);
+    const neighborMid = (prevPrice + nextPrice) / 2;
+    if (neighborMax / neighborMin > ALI_OUTLIER_CFG.maxNeighborSpread) return false;
+    const relativeDelta = Math.abs(currentPrice - neighborMid) / Math.max(0.01, neighborMid);
+    const absoluteDelta = Math.abs(currentPrice - neighborMid);
+    const minAbsoluteDelta = ALI_OUTLIER_CFG.minAbsoluteDeltaByCurrency[currency] || ALI_OUTLIER_CFG.minAbsoluteDelta;
+    if (relativeDelta < ALI_OUTLIER_CFG.minRelativeDelta || absoluteDelta < minAbsoluteDelta) return false;
+    const tooLow = currentPrice <= neighborMin * ALI_OUTLIER_CFG.lowRatio;
+    const tooHigh = currentPrice >= neighborMax * ALI_OUTLIER_CFG.highRatio;
+    if (!tooLow && !tooHigh) return false;
+    const firstTs = toInt(current.firstTs, 0);
+    const lastTs = toInt(current.lastTs, firstTs);
+    const currentDuration = Math.max(0, lastTs - firstTs);
+    if (currentDuration > ALI_OUTLIER_CFG.maxDurationMs) return false;
+    return true;
+  };
+  var isAmazonScaledOutlier = (intervals, index, market) => {
+    if (resolveMarket(market, intervals[index]?.pidKey) !== "amazon") return false;
+    if (intervals.length < 2) return false;
+    const current = intervals[index];
+    const prev = intervals[index - 1];
+    const next = intervals[index + 1];
+    if (!current || !prev && !next) return false;
+    const currency = String(current.currency || "");
+    const neighbors = [prev, next].filter(Boolean);
+    if (neighbors.some((item) => String(item.currency || "") !== currency)) return false;
+    const currentPrice = Number(current.price);
+    const neighborPrices = neighbors.map((item) => Number(item.price));
+    if (![currentPrice, ...neighborPrices].every((value) => Number.isFinite(value) && value > 0)) return false;
+    const neighborMin = Math.min(...neighborPrices);
+    const neighborMax = Math.max(...neighborPrices);
+    if (neighborPrices.length > 1 && neighborMax / neighborMin > AMAZON_OUTLIER_CFG.maxNeighborSpread) return false;
+    const neighborMid = neighborPrices.reduce((sum, price) => sum + price, 0) / neighborPrices.length;
+    const scale = currentPrice / neighborMid;
+    const target = AMAZON_OUTLIER_CFG.expectedScale;
+    if (Math.abs(scale - target) > target * AMAZON_OUTLIER_CFG.scaleTolerance) return false;
+    const firstTs = toInt(current.firstTs, 0);
+    const lastTs = toInt(current.lastTs, firstTs);
+    const currentDuration = Math.max(0, lastTs - firstTs);
+    if (currentDuration > AMAZON_OUTLIER_CFG.maxDurationMs) return false;
+    return true;
+  };
+  var filterAliExpressNoisyIntervals = (rows, market) => {
+    const intervals = sortIntervalsForPid(rows);
+    if (resolveMarket(market, intervals[0]?.pidKey) !== "aliexpress" || intervals.length < 3) return intervals;
+    return intervals.filter((_, index) => !isAliExpressIsolatedOutlier(intervals, index, market));
+  };
+  var filterAmazonNoisyIntervals = (rows, market) => {
+    const intervals = sortIntervalsForPid(rows);
+    if (resolveMarket(market, intervals[0]?.pidKey) !== "amazon" || intervals.length < 3) return intervals;
+    return intervals.filter((_, index) => !isAmazonScaledOutlier(intervals, index, market));
+  };
+  var filterIntervalsByMarketHeuristics = (rows, market) => {
+    const intervals = sortIntervalsForPid(rows);
+    const resolved = resolveMarket(market, intervals[0]?.pidKey);
+    if (resolved === "aliexpress") return filterAliExpressNoisyIntervals(intervals, market);
+    if (resolved === "amazon") return filterAmazonNoisyIntervals(intervals, market);
+    if (resolved !== "wb" || intervals.length < 3) return intervals;
+    return intervals.filter((_, index) => !isWbOutlierInterval(intervals, index, market));
+  };
+  var selectUsageCurrency = (rows, preferredCurrency = "") => {
+    const intervals = sortIntervalsForPid(rows);
+    if (!intervals.length) return "";
+    const cleanPreferred = normalizeCurrency(preferredCurrency);
+    if (cleanPreferred) return cleanPreferred;
+    const latest = pickLatestInterval(intervals);
+    const latestCurrency = normalizeCurrency(latest?.currency);
+    if (latestCurrency) return latestCurrency;
+    for (let i = intervals.length - 1; i >= 0; i -= 1) {
+      const currency = normalizeCurrency(intervals[i]?.currency);
+      if (currency) return currency;
+    }
+    return "";
+  };
+  var filterIntervalsForUsage = (rows, market, preferredCurrency = "") => {
+    const intervals = sortIntervalsForPid(rows);
+    if (!intervals.length) return [];
+    const usageCurrency = selectUsageCurrency(intervals, preferredCurrency);
+    let scoped = intervals;
+    if (usageCurrency) {
+      scoped = intervals.filter((item) => sameCurrency(item.currency, usageCurrency));
+      if (preferredCurrency && !scoped.length) return [];
+      if (!scoped.length) scoped = intervals;
+    }
+    return filterIntervalsByMarketHeuristics(scoped, market);
+  };
+  var clearProductMinFields = (state) => {
+    delete state.minPrice;
+    delete state.minCurrency;
+    delete state.minIntervalKey;
+    delete state.minFirstTs;
+    delete state.minLastTs;
+    delete state.currencyMins;
+  };
+  var buildCurrencyMinEntry = (rows, currency) => {
+    const effective = sortIntervalsForPid(rows);
+    if (!effective.length) return null;
+    let minInterval = effective[0];
+    effective.forEach((item) => {
+      if (Number(item.price) < Number(minInterval.price)) minInterval = item;
+      else if (eq(item.price, minInterval.price) && toInt(item.firstTs, 0) < toInt(minInterval.firstTs, 0)) minInterval = item;
+    });
+    const minPriceValue = Number(minInterval.price);
+    let minFirstTs = toInt(minInterval.firstTs, 0);
+    let minLastTs = toInt(minInterval.lastTs, 0);
+    let lastSeenTs = 0;
+    effective.forEach((item) => {
+      lastSeenTs = Math.max(lastSeenTs, toInt(item.lastTs, 0));
+      if (!eq(item.price, minPriceValue)) return;
+      minFirstTs = Math.min(minFirstTs, toInt(item.firstTs, 0));
+      minLastTs = Math.max(minLastTs, toInt(item.lastTs, 0));
+    });
+    return {
+      currency: normalizeCurrency(currency),
+      price: minPriceValue,
+      intervalKey: String(minInterval.key || ""),
+      firstTs: minFirstTs,
+      lastTs: minLastTs,
+      lastSeenTs
+    };
+  };
+  var buildProductSummary = (pidKey, prevState, rows) => {
+    const intervals = sortIntervalsForPid(rows);
+    if (!intervals.length) return null;
+    const latest = pickLatestInterval(intervals);
+    const market = resolveMarket(latest?.market || prevState?.market, pidKey);
+    const grouped = /* @__PURE__ */ new Map();
+    intervals.forEach((item) => {
+      const key = currencyBucketKey(item.currency);
+      if (!grouped.has(key)) grouped.set(key, { currency: normalizeCurrency(item.currency), rows: [] });
+      grouped.get(key).rows.push(item);
+    });
+    const currencyMins = {};
+    grouped.forEach((group, key) => {
+      const filtered = filterIntervalsByMarketHeuristics(group.rows, market);
+      const entry = buildCurrencyMinEntry(filtered.length ? filtered : group.rows, group.currency);
+      if (entry) currencyMins[key] = entry;
+    });
+    const selectedMin = pickCurrencyMinFromState(
+      {
+        ...prevState,
+        lastCurrency: normalizeCurrency(latest?.currency),
+        currencyMins
+      },
+      ""
+    );
+    const state = prevState ? { ...prevState } : { pidKey, createdAt: now() };
+    state.pidKey = pidKey;
+    state.pid = String(latest?.pid || state.pid || "");
+    state.market = market;
+    state.createdAt = toInt(state.createdAt, now());
+    state.updatedAt = Math.max(
+      ...intervals.map((item) => toInt(item.updatedAt, 0)),
+      toInt(state.updatedAt, 0),
+      now()
+    );
+    state.lastIntervalKey = String(latest?.key || state.lastIntervalKey || "");
+    state.lastPrice = Number(latest?.price);
+    state.lastCurrency = normalizeCurrency(latest?.currency);
+    state.lastTs = toInt(latest?.lastTs, 0);
+    state.currencyMins = currencyMins;
+    if (selectedMin && Number.isFinite(Number(selectedMin.price))) {
+      state.minPrice = Number(selectedMin.price);
+      state.minCurrency = normalizeCurrency(selectedMin.currency);
+      state.minIntervalKey = String(selectedMin.intervalKey || "");
+      state.minFirstTs = toInt(selectedMin.firstTs, 0);
+      state.minLastTs = toInt(selectedMin.lastTs, 0);
+    } else {
+      clearProductMinFields(state);
+    }
+    state.summaryVersion = PRODUCT_SUMMARY_VERSION;
+    state.summaryUpdatedAt = now();
+    return state;
+  };
+  var rebuildProductSummaries = async (pidKeys) => {
+    const keys = [...new Set((Array.isArray(pidKeys) ? pidKeys : []).map((pidKey) => String(pidKey || "").trim()).filter(Boolean))];
+    if (!keys.length) return { rebuilt: 0, deleted: 0 };
+    const db = await openPriceDb();
+    const tx = db.transaction([PRICE_DB.intervals, PRICE_DB.products], "readwrite");
+    const intervalsStore = tx.objectStore(PRICE_DB.intervals);
+    const productsStore = tx.objectStore(PRICE_DB.products);
+    const idxByPid = intervalsStore.index("byPidFirst");
+    let rebuilt = 0;
+    let deleted = 0;
+    for (const pidKey of keys) {
+      const prevState = await idbReq(productsStore.get(pidKey));
+      const range = IDBKeyRange.bound([pidKey, 0], [pidKey, Number.MAX_SAFE_INTEGER]);
+      const rows = await idbReq(idxByPid.getAll(range));
+      const nextState = buildProductSummary(pidKey, prevState, rows);
+      if (!nextState) {
+        if (prevState) {
+          productsStore.delete(pidKey);
+          deleted += 1;
+        }
+        continue;
+      }
+      productsStore.put(nextState);
+      rebuilt += 1;
+    }
+    await txDone(tx);
+    return { rebuilt, deleted };
+  };
+  var ensureProductSummaries = async (pidKeys) => {
+    const keys = [...new Set((Array.isArray(pidKeys) ? pidKeys : []).map((pidKey) => String(pidKey || "").trim()).filter(Boolean))];
+    if (!keys.length) return { rebuilt: 0, deleted: 0 };
+    const db = await openPriceDb();
+    const tx = db.transaction(PRICE_DB.products, "readonly");
+    const store = tx.objectStore(PRICE_DB.products);
+    const stale = [];
+    for (const pidKey of keys) {
+      const state = await idbReq(store.get(pidKey));
+      if (toInt(state?.summaryVersion, 0) >= PRODUCT_SUMMARY_VERSION) continue;
+      stale.push(pidKey);
+    }
+    await txDone(tx);
+    if (!stale.length) return { rebuilt: 0, deleted: 0 };
+    return rebuildProductSummaries(stale);
+  };
+  var collectMarketStats = (store, kind) => new Promise((resolve, reject) => {
+    const stats = {};
+    const req = store.openCursor();
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor) {
+        resolve(stats);
+        return;
+      }
+      const item = cursor.value || {};
+      const market = resolveMarket(item.market, item.pidKey);
+      if (!stats[market]) {
+        stats[market] = {
+          market,
+          products: 0,
+          intervals: 0,
+          lastUpdatedTs: 0
+        };
+      }
+      if (kind === "products") stats[market].products += 1;
+      if (kind === "intervals") stats[market].intervals += 1;
+      const updated = toInt(item.updatedAt, 0);
+      if (updated > stats[market].lastUpdatedTs) stats[market].lastUpdatedTs = updated;
+      cursor.continue();
+    };
+    req.onerror = () => reject(req.error);
+  });
+  var inspectPriceDb = async (opts = {}) => {
+    const productLimit = Math.max(1, Math.min(200, toInt(opts.productLimit, 30)));
+    const intervalLimit = Math.max(1, Math.min(400, toInt(opts.intervalLimit, 120)));
+    const db = await openPriceDb();
+    const tx = db.transaction([PRICE_DB.intervals, PRICE_DB.products], "readonly");
+    const intervalsStore = tx.objectStore(PRICE_DB.intervals);
+    const productsStore = tx.objectStore(PRICE_DB.products);
+    const intervalsCountReq = intervalsStore.count();
+    const productsCountReq = productsStore.count();
+    const newestProductsPromise = readNewestByIndex(productsStore, "byUpdated", productLimit);
+    const newestIntervalsPromise = readNewestByIndex(intervalsStore, "byUpdated", intervalLimit);
+    const productStatsPromise = collectMarketStats(productsStore, "products");
+    const intervalStatsPromise = collectMarketStats(intervalsStore, "intervals");
+    const [newestProducts, newestIntervals, productStats, intervalStats] = await Promise.all([
+      newestProductsPromise,
+      newestIntervalsPromise,
+      productStatsPromise,
+      intervalStatsPromise
+    ]);
+    const intervalsCount = await idbReq(intervalsCountReq);
+    const productsCount = await idbReq(productsCountReq);
+    await txDone(tx);
+    const mergedMarketStatsMap = /* @__PURE__ */ new Map();
+    [productStats, intervalStats].forEach((source) => {
+      Object.keys(source || {}).forEach((market) => {
+        const prev = mergedMarketStatsMap.get(market) || { market, products: 0, intervals: 0, lastUpdatedTs: 0 };
+        const next = source[market] || {};
+        const merged = {
+          market,
+          products: Number(prev.products || 0) + Number(next.products || 0),
+          intervals: Number(prev.intervals || 0) + Number(next.intervals || 0),
+          lastUpdatedTs: Math.max(Number(prev.lastUpdatedTs || 0), Number(next.lastUpdatedTs || 0))
+        };
+        merged.avgIntervalsPerProduct = merged.products > 0 ? Number((merged.intervals / merged.products).toFixed(2)) : 0;
+        mergedMarketStatsMap.set(market, merged);
+      });
+    });
+    const marketStats = [...mergedMarketStatsMap.values()].sort((a, b) => {
+      const rank = { ozon: 1, wb: 2, aliexpress: 3, amazon: 4, unknown: 5 };
+      return (rank[a.market] || 9) - (rank[b.market] || 9);
+    });
+    const totalProducts = Number(productsCount) || 0;
+    const totalIntervals = Number(intervalsCount) || 0;
+    const lastActivityTs = marketStats.reduce((maxTs, item) => Math.max(maxTs, Number(item.lastUpdatedTs) || 0), 0);
+    return {
+      schema: "owb-price-history-ext-v1",
+      inspectedAt: now(),
+      dbName: PRICE_DB.name,
+      dbVersion: db.version,
+      counts: {
+        products: totalProducts,
+        intervals: totalIntervals
+      },
+      totals: {
+        avgIntervalsPerProduct: totalProducts > 0 ? Number((totalIntervals / totalProducts).toFixed(2)) : 0,
+        lastActivityTs
+      },
+      marketStats,
+      newestProducts,
+      newestIntervals
+    };
+  };
+  var exportPriceDb = async () => {
+    const db = await openPriceDb();
+    const tx = db.transaction([PRICE_DB.intervals, PRICE_DB.products], "readonly");
+    const intervals = await idbReq(tx.objectStore(PRICE_DB.intervals).getAll());
+    const products = await idbReq(tx.objectStore(PRICE_DB.products).getAll());
+    await txDone(tx);
+    return {
+      schema: "owb-price-history-ext-v1",
+      exportedAt: now(),
+      dbName: PRICE_DB.name,
+      dbVersion: db.version,
+      intervals: { count: intervals.length, records: intervals },
+      products: { count: products.length, records: products }
+    };
+  };
+  var clearPriceDb = async () => {
+    const db = await openPriceDb();
+    const tx = db.transaction([PRICE_DB.intervals, PRICE_DB.products], "readwrite");
+    tx.objectStore(PRICE_DB.intervals).clear();
+    tx.objectStore(PRICE_DB.products).clear();
+    await txDone(tx);
+  };
+  var importPriceDb = async (payload) => {
+    const mode = payload?.mode === "replace" ? "replace" : "append";
+    const source = payload && typeof payload === "object" && payload.data && typeof payload.data === "object" ? payload.data : payload;
+    const events = [];
+    const addEvent = (raw) => {
+      const n = normalizePriceRecord(raw);
+      if (n) events.push(n);
+    };
+    const addIntervalAsEvents = (raw) => {
+      const n = normalizeIntervalRecord(raw);
+      if (!n) return;
+      addEvent({ pidKey: n.pidKey, pid: n.pid, price: n.price, currency: n.currency, ts: n.firstTs });
+      if (n.lastTs !== n.firstTs) addEvent({ pidKey: n.pidKey, pid: n.pid, price: n.price, currency: n.currency, ts: n.lastTs });
+    };
+    const snapshots = [
+      source?.prices?.records,
+      source?.snapshots,
+      source?.history,
+      source?.records
+    ];
+    snapshots.forEach((list) => {
+      if (Array.isArray(list)) list.forEach(addEvent);
+    });
+    if (Array.isArray(source?.intervals?.records)) source.intervals.records.forEach(addIntervalAsEvents);
+    events.sort((a, b) => a.ts - b.ts);
+    if (mode === "replace") {
+      await clearPriceDb();
+    }
+    const stats = await capturePriceBatch(events);
+    return {
+      mode,
+      imported: events.length,
+      created: stats.created,
+      touched: stats.touched,
+      products: stats.products
+    };
+  };
+  var SYNC_STATE = {
+    running: false,
+    lastAutoAttemptTs: 0,
+    lastResult: null,
+    minFetchedAt: /* @__PURE__ */ new Map(),
+    historyFetchedAt: /* @__PURE__ */ new Map()
+  };
+  var loadSyncConfig = async () => {
+    const raw = await storageGet([
+      CONFIG_KEYS.mode,
+      CONFIG_KEYS.url,
+      CONFIG_KEYS.cursor,
+      CONFIG_KEYS.pullCursor,
+      CONFIG_KEYS.pullCursorId,
+      CONFIG_KEYS.pushCursor,
+      CONFIG_KEYS.pushCursorKey,
+      CONFIG_KEYS.lastSyncTs
+    ]);
+    const mode = raw[CONFIG_KEYS.mode] === "sync" ? "sync" : "local";
+    const rawUrl = Object.prototype.hasOwnProperty.call(raw || {}, CONFIG_KEYS.url) ? raw[CONFIG_KEYS.url] : DEFAULT_SERVER_URL;
+    const serverUrl = trimServerUrl(rawUrl || "");
+    const legacyCursor = toInt(raw[CONFIG_KEYS.cursor], 0);
+    const pullCursorTs = Math.max(toInt(raw[CONFIG_KEYS.pullCursor], legacyCursor), legacyCursor);
+    const pullCursorId = Math.max(0, toInt(raw[CONFIG_KEYS.pullCursorId], 0));
+    const pushCursorTs = Math.max(0, toInt(raw[CONFIG_KEYS.pushCursor], 0));
+    const pushCursorKey = String(raw[CONFIG_KEYS.pushCursorKey] || "");
+    const lastSyncTs = toInt(raw[CONFIG_KEYS.lastSyncTs], 0);
+    return {
+      mode,
+      serverUrl,
+      pullCursorTs,
+      pullCursorId,
+      pushCursorTs,
+      pushCursorKey,
+      lastSyncTs
+    };
+  };
+  var saveSyncConfig = async (cfg = {}) => {
+    const payload = {};
+    if (cfg.mode != null) payload[CONFIG_KEYS.mode] = cfg.mode === "sync" ? "sync" : "local";
+    if (cfg.serverUrl != null || cfg.url != null) payload[CONFIG_KEYS.url] = trimServerUrl(cfg.serverUrl != null ? cfg.serverUrl : cfg.url);
+    if (cfg.pullCursorTs != null || cfg.pullCursor != null) {
+      const pull = Math.max(0, toInt(cfg.pullCursorTs != null ? cfg.pullCursorTs : cfg.pullCursor, 0));
+      payload[CONFIG_KEYS.pullCursor] = pull;
+      payload[CONFIG_KEYS.cursor] = pull;
+    }
+    if (cfg.pullCursorId != null) payload[CONFIG_KEYS.pullCursorId] = Math.max(0, toInt(cfg.pullCursorId, 0));
+    if (cfg.pushCursorTs != null || cfg.pushCursor != null) payload[CONFIG_KEYS.pushCursor] = Math.max(0, toInt(cfg.pushCursorTs != null ? cfg.pushCursorTs : cfg.pushCursor, 0));
+    if (cfg.pushCursorKey != null) payload[CONFIG_KEYS.pushCursorKey] = String(cfg.pushCursorKey || "");
+    if (cfg.lastSyncTs != null) payload[CONFIG_KEYS.lastSyncTs] = Math.max(0, toInt(cfg.lastSyncTs, 0));
+    if (!Object.keys(payload).length) return;
+    await storageSet(payload);
+  };
+  var pingServer = async (serverUrl) => {
+    const res = await serverFetchJson(serverUrl, "/ping", { timeoutMs: Math.min(1e3, SYNC_CFG.requestTimeoutMs) });
+    return !!(res.ok && res.data && res.data.status === "ok");
+  };
+  var syncPushIntervals = async (serverUrl, pushCursorTs, pushCursorKey, batchLimit) => {
+    const changed = await getIntervalsUpdatedSince(pushCursorTs, pushCursorKey, batchLimit);
+    if (!changed.length) {
+      return {
+        pushed: 0,
+        nextPushCursorTs: pushCursorTs,
+        nextPushCursorKey: pushCursorKey,
+        done: true
+      };
+    }
+    const response = await serverFetchJson(serverUrl, "/api/intervals/bulk", {
+      method: "POST",
+      timeoutMs: Math.max(SYNC_CFG.requestTimeoutMs, 3e3),
+      body: {
+        intervals: changed.map((item) => ({
+          pidKey: item.pidKey,
+          pid: item.pid,
+          market: item.market,
+          price: item.price,
+          currency: item.currency,
+          firstTs: item.firstTs,
+          lastTs: item.lastTs,
+          updatedTs: item.updatedTs
+        }))
+      }
+    });
+    if (!response.ok || response.data?.status !== "ok") {
+      throw new Error(response.error || response.data?.error || "push-failed");
+    }
+    const tail = changed[changed.length - 1];
+    return {
+      pushed: changed.length,
+      nextPushCursorTs: toInt(tail?.updatedTs, pushCursorTs),
+      nextPushCursorKey: String(tail?.key || pushCursorKey || ""),
+      done: changed.length < batchLimit
+    };
+  };
+  var syncPullIntervals = async (serverUrl, pullCursorTs, pullCursorId, batchLimit) => {
+    const path = `/api/changes?since=${Math.max(0, pullCursorTs)}&sinceId=${Math.max(0, pullCursorId)}&limit=${Math.max(1, batchLimit)}`;
+    const response = await serverFetchJson(serverUrl, path, {
+      method: "GET",
+      timeoutMs: Math.max(SYNC_CFG.requestTimeoutMs, 3e3)
+    });
+    if (!response.ok || response.data?.status !== "ok") {
+      throw new Error(response.error || response.data?.error || "pull-failed");
+    }
+    const changes = Array.isArray(response.data?.changes) ? response.data.changes : [];
+    const mergeStats = await upsertIntervalsFromSync(changes);
+    let nextPullCursorTs = Math.max(toInt(response.data?.nextSince, pullCursorTs), pullCursorTs);
+    let nextPullCursorId = Math.max(toInt(response.data?.nextSinceId, pullCursorId), pullCursorId);
+    if (changes.length) {
+      const last = changes[changes.length - 1] || {};
+      const lastTs = toInt(last.updatedTs, pullCursorTs);
+      const lastId = Math.max(0, toInt(last.id, pullCursorId));
+      if (lastTs > nextPullCursorTs) {
+        nextPullCursorTs = lastTs;
+        nextPullCursorId = lastId;
+      } else if (lastTs === nextPullCursorTs) {
+        nextPullCursorId = Math.max(nextPullCursorId, lastId);
+      }
+    }
+    return {
+      pulled: changes.length,
+      mergeStats,
+      nextPullCursorTs,
+      nextPullCursorId,
+      done: changes.length < batchLimit
+    };
+  };
+  var runSyncNow = async (opts = {}) => {
+    if (SYNC_STATE.running) {
+      const prev = SYNC_STATE.lastResult || { status: "busy", pushed: 0, pulled: 0 };
+      return { ...prev, status: "busy" };
+    }
+    SYNC_STATE.running = true;
+    try {
+      const cfg = await loadSyncConfig();
+      if (cfg.mode !== "sync" || !cfg.serverUrl) {
+        const result2 = {
+          status: "disabled",
+          pushed: 0,
+          pulled: 0,
+          reachable: false,
+          pushCursor: cfg.pushCursorTs,
+          pushCursorKey: cfg.pushCursorKey,
+          pullCursor: cfg.pullCursorTs,
+          pullCursorId: cfg.pullCursorId,
+          serverUrl: cfg.serverUrl
+        };
+        SYNC_STATE.lastResult = result2;
+        return result2;
+      }
+      const reachable = await pingServer(cfg.serverUrl);
+      if (!reachable) {
+        const result2 = {
+          status: "offline",
+          pushed: 0,
+          pulled: 0,
+          reachable: false,
+          pushCursor: cfg.pushCursorTs,
+          pushCursorKey: cfg.pushCursorKey,
+          pullCursor: cfg.pullCursorTs,
+          pullCursorId: cfg.pullCursorId,
+          serverUrl: cfg.serverUrl
+        };
+        SYNC_STATE.lastResult = result2;
+        return result2;
+      }
+      let pushCursorTs = cfg.pushCursorTs;
+      let pushCursorKey = cfg.pushCursorKey;
+      let pullCursorTs = cfg.pullCursorTs;
+      let pullCursorId = cfg.pullCursorId;
+      let pushed = 0;
+      let pulled = 0;
+      let merged = 0;
+      for (let i = 0; i < SYNC_CFG.maxSyncLoops; i += 1) {
+        const res = await syncPushIntervals(
+          cfg.serverUrl,
+          pushCursorTs,
+          pushCursorKey,
+          Math.max(1, toInt(opts.maxPush, SYNC_CFG.maxPushBatch))
+        );
+        pushed += res.pushed;
+        pushCursorTs = res.nextPushCursorTs;
+        pushCursorKey = res.nextPushCursorKey;
+        if (res.done) break;
+      }
+      for (let i = 0; i < SYNC_CFG.maxSyncLoops; i += 1) {
+        const res = await syncPullIntervals(
+          cfg.serverUrl,
+          pullCursorTs,
+          pullCursorId,
+          Math.max(1, toInt(opts.maxPull, SYNC_CFG.maxPullBatch))
+        );
+        pulled += res.pulled;
+        merged += toInt(res.mergeStats?.inserted, 0) + toInt(res.mergeStats?.merged, 0) + toInt(res.mergeStats?.updated, 0);
+        pullCursorTs = res.nextPullCursorTs;
+        pullCursorId = res.nextPullCursorId;
+        if (res.done) break;
+      }
+      const syncedAt = now();
+      await saveSyncConfig({
+        pushCursorTs,
+        pushCursorKey,
+        pullCursorTs,
+        pullCursorId,
+        lastSyncTs: syncedAt
+      });
+      const result = {
+        status: "ok",
+        pushed,
+        pulled,
+        merged,
+        reachable: true,
+        pushCursor: pushCursorTs,
+        pushCursorKey,
+        pullCursor: pullCursorTs,
+        pullCursorId,
+        lastSyncTs: syncedAt,
+        serverUrl: cfg.serverUrl
+      };
+      SYNC_STATE.lastResult = result;
+      return result;
+    } catch (err) {
+      const result = {
+        status: "error",
+        pushed: 0,
+        pulled: 0,
+        reachable: false,
+        error: String(err && err.message ? err.message : err)
+      };
+      SYNC_STATE.lastResult = result;
+      return result;
+    } finally {
+      SYNC_STATE.running = false;
+    }
+  };
+  var maybeAutoSync = async (reason = "auto") => {
+    const ts = now();
+    if (SYNC_STATE.running) return;
+    if (ts - SYNC_STATE.lastAutoAttemptTs < SYNC_CFG.autoSyncCooldownMs) return;
+    SYNC_STATE.lastAutoAttemptTs = ts;
+    try {
+      await runSyncNow({ reason });
+    } catch (_) {
+    }
+  };
+  var canProbeServer = () => {
+    if (SYNC_STATE.running) return false;
+    if (SYNC_STATE.lastResult?.status !== "offline") return true;
+    return now() - toInt(SYNC_STATE.lastAutoAttemptTs, 0) >= SYNC_CFG.autoSyncCooldownMs;
+  };
+  var fetchServerHistoryForPid = async (cfg, pidKey) => {
+    const response = await serverFetchJson(cfg.serverUrl, `/api/history?pidKey=${encodeURIComponent(pidKey)}`, {
+      method: "GET",
+      timeoutMs: Math.max(SYNC_CFG.requestTimeoutMs, 3e3)
+    });
+    if (!response.ok || response.data?.status !== "ok") return { ok: false };
+    const rows = Array.isArray(response.data?.history) ? response.data.history : [];
+    if (!rows.length) return { ok: true, merged: { accepted: 0, inserted: 0, merged: 0, updated: 0, products: 0 } };
+    const merged = await upsertIntervalsFromSync(rows);
+    return { ok: true, merged };
+  };
+  var fetchServerMinsForPidKeys = async (cfg, pidKeys, preferredCurrencies = {}) => {
+    const preferred = {};
+    (Array.isArray(pidKeys) ? pidKeys : []).forEach((pidKey) => {
+      const cleanPidKey = String(pidKey || "").trim();
+      const currency = normalizeCurrency(preferredCurrencies?.[cleanPidKey]);
+      if (!cleanPidKey || !currency) return;
+      preferred[cleanPidKey] = currency;
+    });
+    const response = await serverFetchJson(cfg.serverUrl, "/api/min-batch", {
+      method: "POST",
+      timeoutMs: Math.max(SYNC_CFG.requestTimeoutMs, 3e3),
+      body: {
+        pidKeys,
+        preferredCurrencies: preferred
+      }
+    });
+    if (!response.ok || response.data?.status !== "ok") return { ok: false };
+    const minsPayload = response.data?.mins;
+    const rows = [];
+    if (Array.isArray(minsPayload)) {
+      minsPayload.forEach((item) => rows.push(item));
+    } else if (minsPayload && typeof minsPayload === "object") {
+      Object.keys(minsPayload).forEach((pidKey) => {
+        const item = minsPayload[pidKey];
+        if (!item || typeof item !== "object") return;
+        rows.push({ pidKey, ...item });
+      });
+    }
+    if (!rows.length) return { ok: true, merged: { accepted: 0, inserted: 0, merged: 0, updated: 0, products: 0 } };
+    const merged = await upsertIntervalsFromSync(rows);
+    return { ok: true, merged };
+  };
+  var getMergedHistoryByPid = async (pidKey, limit = 5e3, preferredCurrency = "") => {
+    const cleanPidKey = String(pidKey || "").trim();
+    if (!cleanPidKey) return [];
+    const cfg = await loadSyncConfig();
+    if (cfg.mode === "sync" && cfg.serverUrl) {
+      await maybeAutoSync("history-request");
+      const lastFetch = toInt(SYNC_STATE.historyFetchedAt.get(cleanPidKey), 0);
+      if (now() - lastFetch >= SYNC_CFG.historyFetchTtlMs && canProbeServer()) {
+        const fetched = await fetchServerHistoryForPid(cfg, cleanPidKey);
+        if (fetched.ok) SYNC_STATE.historyFetchedAt.set(cleanPidKey, now());
+      }
+    }
+    const intervals = await getIntervalsByPid(cleanPidKey, limit);
+    return filterIntervalsForUsage(intervals, cleanPidKey, preferredCurrency);
+  };
+  var getMergedMinBatch = async (pidKeys, preferredCurrencies = {}) => {
+    const keys = [...new Set((Array.isArray(pidKeys) ? pidKeys : []).map((k) => String(k || "").trim()).filter(Boolean))];
+    if (!keys.length) return {};
+    const localMins = await getMinBatch(keys, preferredCurrencies);
+    const cfg = await loadSyncConfig();
+    if (cfg.mode === "sync" && cfg.serverUrl) {
+      await maybeAutoSync("min-request");
+      const ts = now();
+      const toFetch = keys.filter((pidKey) => {
+        const local = localMins[pidKey];
+        if (!local) return true;
+        const lastFetched = toInt(SYNC_STATE.minFetchedAt.get(pidKey), 0);
+        return ts - lastFetched >= SYNC_CFG.minFetchTtlMs;
+      });
+      if (toFetch.length && canProbeServer()) {
+        const fetched = await fetchServerMinsForPidKeys(cfg, toFetch, preferredCurrencies);
+        if (fetched.ok) toFetch.forEach((pidKey) => SYNC_STATE.minFetchedAt.set(pidKey, ts));
+      }
+    }
+    return getMinBatch(keys, preferredCurrencies);
+  };
+  var openPriceHistoryEditor = async (payload = {}) => {
+    const pidKey = String(payload.pidKey || "").trim();
+    if (!pidKey) throw new Error("pidKey is required");
+    const params = new URLSearchParams({ pidKey });
+    const currency = normalizeCurrency(payload.currency || payload.preferredCurrency);
+    if (currency) params.set("currency", currency);
+    const url = chrome.runtime.getURL(`build/history/history.html?${params.toString()}`);
+    const width = Math.max(760, Math.min(1120, toInt(payload.width, 980)));
+    const height = Math.max(520, Math.min(900, toInt(payload.height, 720)));
+    const win = await windowsCreate({
+      url,
+      type: "popup",
+      width,
+      height,
+      focused: true
+    });
+    return {
+      windowId: toInt(win?.id, 0),
+      url
+    };
+  };
+  var LAST_EXTRACT_SESSION_KEY = "owb-last-extract-session";
+  var sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  var tabsQuery = (queryInfo) => new Promise((resolve, reject) => {
+    chrome.tabs.query(queryInfo, (tabs) => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        reject(new Error(err.message || "Cannot query tabs"));
+        return;
+      }
+      resolve(Array.isArray(tabs) ? tabs : []);
+    });
+  });
+  var tabsUpdate = (tabId, updateProps) => new Promise((resolve, reject) => {
+    chrome.tabs.update(tabId, updateProps, (tab) => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        reject(new Error(err.message || "Cannot update tab"));
+        return;
+      }
+      resolve(tab || null);
+    });
+  });
+  var tabsCreate = (createProps) => new Promise((resolve, reject) => {
+    chrome.tabs.create(createProps, (tab) => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        reject(new Error(err.message || "Cannot create tab"));
+        return;
+      }
+      resolve(tab || null);
+    });
+  });
+  var windowsUpdate = (windowId, updateInfo) => new Promise((resolve) => {
+    if (!(chrome.windows && typeof chrome.windows.update === "function") || !Number.isFinite(Number(windowId))) {
+      resolve(null);
+      return;
+    }
+    chrome.windows.update(Number(windowId), updateInfo || {}, (win) => {
+      const err = chrome.runtime.lastError;
+      resolve(err ? null : win || null);
+    });
+  });
+  var windowsCreate = (createData) => new Promise((resolve, reject) => {
+    if (!(chrome.windows && typeof chrome.windows.create === "function")) {
+      reject(new Error("Windows API is unavailable"));
+      return;
+    }
+    chrome.windows.create(createData, (win) => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        reject(new Error(err.message || "Cannot create window"));
+        return;
+      }
+      resolve(win || null);
+    });
+  });
+  var tabsGet = (tabId) => new Promise((resolve, reject) => {
+    chrome.tabs.get(tabId, (tab) => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        reject(new Error(err.message || "Cannot get tab"));
+        return;
+      }
+      resolve(tab || null);
+    });
+  });
+  var tabsRemove = (tabIds) => new Promise((resolve, reject) => {
+    const ids = (Array.isArray(tabIds) ? tabIds : [tabIds]).map((v) => Number(v)).filter((v) => Number.isFinite(v));
+    if (!ids.length) {
+      resolve(true);
+      return;
+    }
+    chrome.tabs.remove(ids, () => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        reject(new Error(err.message || "Cannot remove tabs"));
+        return;
+      }
+      resolve(true);
+    });
+  });
+  var sendMessageToTab = (tabId, message) => new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        reject(new Error(err.message || "Cannot communicate with tab"));
+        return;
+      }
+      resolve(response);
+    });
+  });
+  var waitTabComplete = async (tabId, timeoutMs = 25e3) => {
+    const current = await tabsGet(tabId).catch(() => null);
+    if (!current || current.status === "complete") return true;
+    return new Promise((resolve) => {
+      let done = false;
+      let timer = null;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        if (timer) clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(onUpdated);
+        resolve(true);
+      };
+      const onUpdated = (updatedTabId, changeInfo) => {
+        if (updatedTabId !== tabId) return;
+        if (changeInfo.status === "complete") finish();
+      };
+      chrome.tabs.onUpdated.addListener(onUpdated);
+      timer = setTimeout(() => finish(), Math.max(3e3, Number(timeoutMs) || 25e3));
+    });
+  };
+  var MARKET_HOST_RE = /(^|\.)((ozon\.(ru|com|kz|by|uz|am|kg|ge))|(wildberries\.(ru|by|kz|uz|am|kg|ge))|(wb\.ru)|(aliexpress\.(ru|com))|(amazon\.com))$/i;
+  var parseMarketProductFromUrl = (url) => {
+    try {
+      const u = new URL(String(url || ""));
+      if (!/^https?:$/i.test(u.protocol)) return null;
+      const host = String(u.hostname || "").toLowerCase();
+      const path = String(u.pathname || "");
+      if (!MARKET_HOST_RE.test(host)) return null;
+      if (host.includes("ozon")) {
+        const m = path.match(/\/product\/[^/]*?(\d{5,})(?:\/|$)/) || path.match(/\/product\/(\d{5,})(?:\/|$)/);
+        if (!m) return null;
+        return { market: "ozon", pid: m[1], pidKey: `ozon:${m[1]}` };
+      }
+      if (host.includes("wildberries") || host.endsWith("wb.ru")) {
+        const m = path.match(/\/catalog\/(\d{4,})\/detail/i) || path.match(/\/catalog\/(\d{4,})\/feedbacks/i);
+        if (!m) return null;
+        return { market: "wb", pid: m[1], pidKey: `wb:${m[1]}` };
+      }
+      if (host.includes("aliexpress")) {
+        const m = path.match(/\/item\/(\d{8,})(?:\.html)?(?:\/|$)/i) || path.match(/\/item\/(\d{8,})\/reviews(?:\/|$)/i) || path.match(/\/i\/(\d{8,})(?:\.html)?(?:\/|$)/i);
+        if (!m) return null;
+        return { market: "aliexpress", pid: m[1], pidKey: `aliexpress:${m[1]}` };
+      }
+      if (host.includes("amazon.")) {
+        const m = path.match(/\/(?:dp|gp\/product|exec\/obidos\/ASIN)\/([A-Z0-9]{10})(?:[/?#]|$)/i);
+        if (!m) return null;
+        const asin = String(m[1] || "").toUpperCase();
+        return { market: "amazon", pid: asin, pidKey: `amazon:${asin}` };
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  };
+  var collectWindowProductTabs = async (windowId = null) => {
+    const queryInfo = Number.isFinite(Number(windowId)) && Number(windowId) >= 0 ? { windowId: Number(windowId) } : { currentWindow: true };
+    const tabs = await tabsQuery(queryInfo);
+    return tabs.map((tab) => ({ tab, product: parseMarketProductFromUrl(tab.url) })).filter((item) => !!item.product && Number.isFinite(Number(item.tab && item.tab.id)));
+  };
+  var normalizeTabUrl = (url) => {
+    try {
+      const u = new URL(String(url || ""));
+      if (!/^https?:$/i.test(u.protocol)) return "";
+      u.hash = "";
+      return u.toString();
+    } catch (_) {
+      return "";
+    }
+  };
+  var isMarketTabUrl = (url) => {
+    try {
+      const u = new URL(String(url || ""));
+      return /^https?:$/i.test(u.protocol) && MARKET_HOST_RE.test(String(u.hostname || "").toLowerCase());
+    } catch (_) {
+      return false;
+    }
+  };
+  var requestCurrentProductFromTab = async (tabId) => {
+    try {
+      const response = await sendMessageToTab(tabId, { scope: "owb", action: "monitor:get-current-product" });
+      if (!response || !response.ok || !response.data || typeof response.data !== "object") return null;
+      const pidKey = String(response.data.pidKey || "").trim();
+      if (!pidKey) return null;
+      return {
+        market: String(response.data.market || "").trim().toLowerCase(),
+        pid: String(response.data.pid || "").trim(),
+        pidKey
+      };
+    } catch (_) {
+      return null;
+    }
+  };
+  var closeDuplicateTabsInWindow = async (opts = {}) => {
+    const queryInfo = Number.isFinite(Number(opts.windowId)) && Number(opts.windowId) >= 0 ? { windowId: Number(opts.windowId) } : { currentWindow: true };
+    const tabs = await tabsQuery(queryInfo);
+    if (!tabs.length) {
+      return {
+        totalTabs: 0,
+        consideredTabs: 0,
+        duplicateGroups: 0,
+        keptCount: 0,
+        closedCount: 0,
+        byPidKey: 0,
+        byUrlKey: 0,
+        closedTabIds: []
+      };
+    }
+    const candidates = tabs.filter((tab) => Number.isFinite(Number(tab && tab.id))).map((tab) => {
+      const fromUrl = parseMarketProductFromUrl(tab.url || "");
+      return {
+        tabId: Number(tab.id),
+        index: Number.isFinite(Number(tab.index)) ? Number(tab.index) : Number.MAX_SAFE_INTEGER,
+        active: tab.active === true,
+        urlKey: normalizeTabUrl(tab.url || ""),
+        pidKey: fromUrl && fromUrl.pidKey ? String(fromUrl.pidKey) : "",
+        market: fromUrl && fromUrl.market ? String(fromUrl.market) : "",
+        isMarketTab: isMarketTabUrl(tab.url || "")
+      };
+    });
+    const needDetector = candidates.filter((item) => !item.pidKey && item.isMarketTab);
+    if (needDetector.length) {
+      const detected = await Promise.all(needDetector.map((item) => requestCurrentProductFromTab(item.tabId)));
+      for (let i = 0; i < needDetector.length; i += 1) {
+        const d = detected[i];
+        if (!d || !d.pidKey) continue;
+        needDetector[i].pidKey = d.pidKey;
+      }
+    }
+    const keyToTabs = /* @__PURE__ */ new Map();
+    let consideredTabs = 0;
+    let byPidKey = 0;
+    let byUrlKey = 0;
+    candidates.forEach((item) => {
+      let dedupeKey = "";
+      if (item.pidKey) {
+        dedupeKey = `pid:${item.pidKey}`;
+        byPidKey += 1;
+      } else if (item.urlKey) {
+        dedupeKey = `url:${item.urlKey}`;
+        byUrlKey += 1;
+      }
+      if (!dedupeKey) return;
+      consideredTabs += 1;
+      if (!keyToTabs.has(dedupeKey)) keyToTabs.set(dedupeKey, []);
+      keyToTabs.get(dedupeKey).push(item);
+    });
+    const toCloseIds = [];
+    let duplicateGroups = 0;
+    let keptCount = 0;
+    for (const group of keyToTabs.values()) {
+      if (!Array.isArray(group) || group.length <= 1) continue;
+      duplicateGroups += 1;
+      const sorted = group.slice().sort((a, b) => a.index - b.index);
+      const keep = sorted.find((tab) => tab.active) || sorted[0];
+      keptCount += 1;
+      sorted.forEach((tab) => {
+        if (tab.tabId !== keep.tabId) toCloseIds.push(tab.tabId);
+      });
+    }
+    if (toCloseIds.length) {
+      await tabsRemove(toCloseIds);
+    }
+    return {
+      totalTabs: tabs.length,
+      consideredTabs,
+      duplicateGroups,
+      keptCount,
+      closedCount: toCloseIds.length,
+      byPidKey,
+      byUrlKey,
+      closedTabIds: toCloseIds
+    };
+  };
+  var buildCombinedText = (items) => items.map((item, idx) => {
+    const title = String(item.title || item.pidKey || item.url || `card-${idx + 1}`).trim();
+    const url = String(item.url || "").trim();
+    return `### ${idx + 1}. ${title}${url ? `
+URL: ${url}` : ""}
+
+${item.text || ""}`;
+  }).join("\n\n---\n\n");
+  var getLastExtractSession = async () => {
+    const raw = await storageGet([LAST_EXTRACT_SESSION_KEY]);
+    return raw[LAST_EXTRACT_SESSION_KEY] || null;
+  };
+  var saveLastExtractSession = async (payload = {}) => {
+    const item = payload && typeof payload.item === "object" ? payload.item : {};
+    const text = String(item.text || "");
+    const mode = payload.mode === "copy" ? "copy" : "download";
+    const nowTs = now();
+    const title = String(item.title || item.pidKey || item.url || "card").trim();
+    const session = {
+      createdAt: nowTs,
+      mode,
+      allReviews: payload.allReviews === true,
+      totalTabs: 1,
+      successCount: 1,
+      failCount: 0,
+      failures: [],
+      items: [{
+        tabId: Number.isFinite(Number(payload.tabId)) ? Number(payload.tabId) : null,
+        market: String(item.market || ""),
+        pidKey: String(item.pidKey || ""),
+        title,
+        url: String(item.url || ""),
+        filename: String(item.filename || "")
+      }],
+      text,
+      storedTruncated: false
+    };
+    await storageSet({ [LAST_EXTRACT_SESSION_KEY]: session });
+    return session;
+  };
+  var collectAliExpressReviewsInTempTab = async (payload = {}, sender = {}) => {
+    const url = String(payload.url || "").trim();
+    if (!url || !/^https:\/\/[^/]*aliexpress\.(ru|com)\//i.test(url)) {
+      throw new Error("Invalid AliExpress reviews URL");
+    }
+    let tab = null;
+    let restoreTabId = null;
+    let restoreWindowId = null;
+    try {
+      const senderTab = sender && sender.tab ? sender.tab : null;
+      restoreWindowId = Number.isFinite(Number(senderTab?.windowId)) ? Number(senderTab.windowId) : null;
+      const activeTabs = restoreWindowId != null ? await tabsQuery({ windowId: restoreWindowId, active: true }).catch(() => []) : [];
+      restoreTabId = Number.isFinite(Number(activeTabs[0]?.id)) ? Number(activeTabs[0].id) : null;
+      const createProps = {
+        url,
+        active: true
+      };
+      if (Number.isFinite(Number(senderTab?.windowId))) createProps.windowId = Number(senderTab.windowId);
+      if (Number.isFinite(Number(senderTab?.index))) createProps.index = Number(senderTab.index) + 1;
+      tab = await tabsCreate(createProps);
+      if (!tab || !Number.isFinite(Number(tab.id))) throw new Error("Cannot open AliExpress reviews tab");
+      if (Number.isFinite(Number(tab.windowId))) await windowsUpdate(tab.windowId, { focused: true });
+      await tabsUpdate(tab.id, { active: true }).catch(() => null);
+      await waitTabComplete(tab.id, 35e3);
+      await sleepMs(1400);
+      let response = null;
+      let lastError = "";
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        try {
+          response = await sendMessageToTab(tab.id, {
+            scope: "owb-ali-reviews",
+            action: "collect-reviews",
+            payload: {
+              maxReviews: payload.maxReviews || 100,
+              reviewsTotal: payload.reviewsTotal || ""
+            }
+          });
+          lastError = "";
+          break;
+        } catch (err) {
+          lastError = String(err && err.message ? err.message : err);
+          await sleepMs(450);
+        }
+      }
+      if (!response || !response.ok) {
+        throw new Error(response && response.error || lastError || "AliExpress reviews collection failed");
+      }
+      return response.data || { header: "\u041E\u0442\u0437\u044B\u0432\u044B: \u0431\u043B\u043E\u043A \u043E\u0442\u0437\u044B\u0432\u043E\u0432 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D", items: [] };
+    } finally {
+      if (restoreWindowId != null) await windowsUpdate(restoreWindowId, { focused: true });
+      if (restoreTabId != null) await tabsUpdate(restoreTabId, { active: true }).catch(() => null);
+      if (tab && Number.isFinite(Number(tab.id))) {
+        await tabsRemove(tab.id).catch(() => null);
+      }
+    }
+  };
+  var collectAmazonReviewsInTempTab = async (payload = {}, sender = {}) => {
+    const url = String(payload.url || "").trim();
+    if (!url || !/^https:\/\/[^/]*amazon\.com\/product-reviews\/[A-Z0-9]{10}/i.test(url)) {
+      throw new Error("Invalid Amazon reviews URL");
+    }
+    let tab = null;
+    let restoreTabId = null;
+    let restoreWindowId = null;
+    try {
+      const senderTab = sender && sender.tab ? sender.tab : null;
+      restoreWindowId = Number.isFinite(Number(senderTab?.windowId)) ? Number(senderTab.windowId) : null;
+      const activeTabs = restoreWindowId != null ? await tabsQuery({ windowId: restoreWindowId, active: true }).catch(() => []) : [];
+      restoreTabId = Number.isFinite(Number(activeTabs[0]?.id)) ? Number(activeTabs[0].id) : null;
+      const createProps = {
+        url,
+        active: true
+      };
+      if (Number.isFinite(Number(senderTab?.windowId))) createProps.windowId = Number(senderTab.windowId);
+      if (Number.isFinite(Number(senderTab?.index))) createProps.index = Number(senderTab.index) + 1;
+      tab = await tabsCreate(createProps);
+      if (!tab || !Number.isFinite(Number(tab.id))) throw new Error("Cannot open Amazon reviews tab");
+      if (Number.isFinite(Number(tab.windowId))) await windowsUpdate(tab.windowId, { focused: true });
+      await tabsUpdate(tab.id, { active: true }).catch(() => null);
+      await waitTabComplete(tab.id, 35e3);
+      await sleepMs(1400);
+      let response = null;
+      let lastError = "";
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        try {
+          response = await sendMessageToTab(tab.id, {
+            scope: "owb-amazon-reviews",
+            action: "collect-reviews",
+            payload: {
+              maxReviews: payload.maxReviews || 100
+            }
+          });
+          lastError = "";
+          break;
+        } catch (err) {
+          lastError = String(err && err.message ? err.message : err);
+          await sleepMs(450);
+        }
+      }
+      if (!response || !response.ok) {
+        throw new Error(response && response.error || lastError || "Amazon reviews collection failed");
+      }
+      return response.data || { header: "\u041E\u0442\u0437\u044B\u0432\u044B: \u0431\u043B\u043E\u043A \u043E\u0442\u0437\u044B\u0432\u043E\u0432 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D", items: [] };
+    } finally {
+      if (restoreWindowId != null) await windowsUpdate(restoreWindowId, { focused: true });
+      if (restoreTabId != null) await tabsUpdate(restoreTabId, { active: true }).catch(() => null);
+      if (tab && Number.isFinite(Number(tab.id))) {
+        await tabsRemove(tab.id).catch(() => null);
+      }
+    }
+  };
+  var runWindowExportBatch = async (opts = {}) => {
+    const mode = opts.mode === "copy" ? "copy" : "download";
+    const allReviews = opts.allReviews === true;
+    const includeReviews = opts.includeReviews !== false;
+    const tabPairs = await collectWindowProductTabs(opts.windowId);
+    const originalActive = tabPairs.find((item) => item.tab && item.tab.active)?.tab || null;
+    const successes = [];
+    const failures = [];
+    for (let i = 0; i < tabPairs.length; i += 1) {
+      const { tab, product } = tabPairs[i];
+      try {
+        await tabsUpdate(tab.id, { active: true });
+        await waitTabComplete(tab.id, 25e3);
+        await sleepMs(450);
+        const response = await sendMessageToTab(tab.id, {
+          scope: "owb-export",
+          action: "export-card",
+          options: {
+            includeReviews,
+            allReviews
+          }
+        });
+        if (!response || !response.ok || !response.data || !response.data.text) {
+          throw new Error(response && response.error ? response.error : "Empty export response");
+        }
+        const data = response.data;
+        const filename = sanitizeFilename(data.filename || `${product.pidKey || `card_${tab.id}`}.txt`);
+        const item = {
+          tabId: tab.id,
+          market: data.market || product.market,
+          pidKey: data.pidKey || product.pidKey,
+          title: data.title || tab.title || product.pidKey,
+          url: data.url || tab.url,
+          filename,
+          text: String(data.text || "")
+        };
+        if (mode === "download") {
+          await handleDownloadText({
+            name: filename,
+            text: item.text
+          });
+        }
+        successes.push(item);
+        await sendMessageToTab(tab.id, {
+          scope: "owb-export",
+          action: "restore-card-focus",
+          options: {
+            mode,
+            market: item.market || "",
+            scope: "batch"
+          }
+        }).catch(() => null);
+      } catch (err) {
+        failures.push({
+          tabId: tab.id,
+          url: tab.url || "",
+          pidKey: product && product.pidKey ? product.pidKey : "",
+          error: String(err && err.message ? err.message : err)
+        });
+      }
+    }
+    if (originalActive && Number.isFinite(Number(originalActive.id))) {
+      await tabsUpdate(originalActive.id, { active: true }).catch(() => null);
+    }
+    const combinedText = buildCombinedText(successes);
+    const clipboard = {
+      attempted: false,
+      ok: false,
+      error: "",
+      viaTabId: null
+    };
+    if (mode === "copy" && combinedText) {
+      clipboard.attempted = true;
+      const candidateTabIds = [];
+      const seenTabIds = /* @__PURE__ */ new Set();
+      const pushCandidate = (tabId) => {
+        const n = Number(tabId);
+        if (!Number.isFinite(n)) return;
+        if (seenTabIds.has(n)) return;
+        seenTabIds.add(n);
+        candidateTabIds.push(n);
+      };
+      pushCandidate(originalActive && originalActive.id);
+      successes.forEach((item) => pushCandidate(item.tabId));
+      let lastError = "";
+      for (let i = 0; i < candidateTabIds.length; i += 1) {
+        const tabId = candidateTabIds[i];
+        try {
+          const response = await sendMessageToTab(tabId, {
+            scope: "owb-export",
+            action: "copy-text",
+            payload: {
+              text: combinedText
+            }
+          });
+          if (response && response.ok) {
+            clipboard.ok = true;
+            clipboard.viaTabId = tabId;
+            lastError = "";
+            break;
+          }
+          lastError = String(response && response.error || "Clipboard write failed");
+        } catch (err) {
+          lastError = String(err && err.message ? err.message : err);
+        }
+      }
+      clipboard.error = lastError;
+    }
+    const maxStoredChars = 9e5;
+    const storedText = combinedText.length > maxStoredChars ? `${combinedText.slice(0, maxStoredChars)}
+
+[...\u041E\u0411\u0420\u0415\u0417\u0410\u041D\u041E \u0414\u041B\u042F \u0425\u0420\u0410\u041D\u0415\u041D\u0418\u042F \u0412 \u0421\u0415\u0421\u0421\u0418\u0418...]` : combinedText;
+    const session = {
+      createdAt: now(),
+      mode,
+      allReviews,
+      totalTabs: tabPairs.length,
+      successCount: successes.length,
+      failCount: failures.length,
+      failures,
+      items: successes.map((item) => ({
+        tabId: item.tabId,
+        market: item.market,
+        pidKey: item.pidKey,
+        title: item.title,
+        url: item.url,
+        filename: item.filename
+      })),
+      text: storedText,
+      storedTruncated: storedText.length !== combinedText.length
+    };
+    await storageSet({ [LAST_EXTRACT_SESSION_KEY]: session });
+    return {
+      ...session,
+      combinedText,
+      clipboard
+    };
+  };
+  var getPriceStatus = async () => {
+    const cfg = await loadSyncConfig();
+    let reachable = false;
+    if (cfg.mode === "sync" && cfg.serverUrl) {
+      reachable = await pingServer(cfg.serverUrl);
+    }
+    return {
+      mode: cfg.mode,
+      serverUrl: cfg.serverUrl,
+      cursor: cfg.pullCursorTs,
+      pullCursor: cfg.pullCursorTs,
+      pullCursorId: cfg.pullCursorId,
+      pushCursor: cfg.pushCursorTs,
+      pushCursorKey: cfg.pushCursorKey,
+      reachable,
+      legacyMode: false,
+      lastSyncTs: cfg.lastSyncTs || toInt(SYNC_STATE.lastResult?.lastSyncTs, 0),
+      lastSyncStatus: String(SYNC_STATE.lastResult?.status || "")
+    };
+  };
+  var setPriceConfig = async (payload) => {
+    const mode = payload && payload.mode === "sync" ? "sync" : "local";
+    const url = trimServerUrl(payload?.url || "");
+    await saveSyncConfig({
+      mode,
+      serverUrl: url
+    });
+    if (mode === "sync" && url) {
+      await maybeAutoSync("set-config");
+    }
+    return getPriceStatus();
+  };
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (!message || typeof message.type !== "string" || !message.type.startsWith("owb:")) return void 0;
+    (async () => {
+      switch (message.type) {
+        case "owb:download-text":
+          return handleDownloadText(message);
+        case "owb:request-json":
+          return handleJsonRequest(message);
+        case "owb:price-capture-batch": {
+          const data = await capturePriceBatch(message.records || []);
+          maybeAutoSync("capture").catch(() => {
+          });
+          return { ok: true, data };
+        }
+        case "owb:price-history":
+          return {
+            ok: true,
+            data: {
+              pidKey: message.pidKey || "",
+              intervals: await getMergedHistoryByPid(
+                message.pidKey,
+                message.limit || 5e3,
+                normalizeCurrency(message.preferredCurrency || message.payload?.preferredCurrency)
+              )
+            }
+          };
+        case "owb:price-min-batch":
+          return {
+            ok: true,
+            data: await getMergedMinBatch(
+              message.pidKeys || [],
+              message.preferredCurrencies && typeof message.preferredCurrencies === "object" ? message.preferredCurrencies : message.payload?.preferredCurrencies && typeof message.payload.preferredCurrencies === "object" ? message.payload.preferredCurrencies : {}
+            )
+          };
+        case "owb:price-open-history-editor":
+          return { ok: true, data: await openPriceHistoryEditor(message.payload || message || {}) };
+        case "owb:price-export":
+          return { ok: true, data: await exportPriceDb() };
+        case "owb:price-inspect":
+          return { ok: true, data: await inspectPriceDb(message.options || message.payload || {}) };
+        case "owb:price-import":
+          return { ok: true, data: await importPriceDb(message.payload || {}) };
+        case "owb:price-delete-interval":
+          return { ok: true, data: await deletePriceInterval(message.payload || message.interval || {}) };
+        case "owb:price-reset-product":
+          return { ok: true, data: await resetMergedPriceHistoryByPid(message.pidKey || message.payload?.pidKey || "") };
+        case "owb:price-reset-market":
+          return { ok: true, data: await resetPriceHistoryByMarket(message.market || message.payload?.market || "") };
+        case "owb:price-get-status":
+          return { ok: true, data: await getPriceStatus() };
+        case "owb:price-set-config":
+          return { ok: true, data: await setPriceConfig(message.payload || {}) };
+        case "owb:price-sync-now":
+          return { ok: true, data: await runSyncNow({ reason: "manual" }) };
+        case "owb:batch-run-window-export":
+          return { ok: true, data: await runWindowExportBatch(message.payload || {}) };
+        case "owb:batch-get-last-session":
+          return { ok: true, data: await getLastExtractSession() };
+        case "owb:extract-save-last-session":
+          return { ok: true, data: await saveLastExtractSession(message.payload || {}) };
+        case "owb:ali-collect-reviews":
+          return { ok: true, data: await collectAliExpressReviewsInTempTab(message.payload || {}, _sender || {}) };
+        case "owb:amazon-collect-reviews":
+          return { ok: true, data: await collectAmazonReviewsInTempTab(message.payload || {}, _sender || {}) };
+        case "owb:tabs-close-duplicates":
+          return { ok: true, data: await closeDuplicateTabsInWindow(message.payload || {}) };
+        default:
+          return { ok: false, error: `Unknown message type: ${message.type}` };
+      }
+    })().then(sendResponse).catch((err) => {
+      sendResponse({ ok: false, error: String(err && err.message ? err.message : err) });
+    });
+    return true;
+  });
+  if (chrome.runtime && chrome.runtime.onStartup) {
+    chrome.runtime.onStartup.addListener(() => {
+      maybeAutoSync("startup").catch(() => {
+      });
+    });
+  }
+  if (chrome.runtime && chrome.runtime.onInstalled) {
+    chrome.runtime.onInstalled.addListener(() => {
+      maybeAutoSync("installed").catch(() => {
+      });
+    });
+  }
+})();

@@ -1,5 +1,5 @@
 (() => {
-  // content/mp-core.js
+  // src/content/mp-core.js
   (() => {
     "use strict";
     const MP = window.MP || (window.MP = {});
@@ -178,11 +178,26 @@
       if (!text) return null;
       const normalizedText = String(text).replace(/[\u00A0\u202F]/g, " ").replace(/\s+/g, " ").trim();
       if (!normalizedText) return null;
-      const byCurrency = normalizedText.match(/(\d[\d\s.,]*?)\s*[₽€$£¥֏₸₺₴₹₩]/);
-      const rawNumber = byCurrency && byCurrency[1] || (normalizedText.match(/(\d[\d\s.,]*)/) || [])[1] || "";
+      const escapedCurrencyChars = "\u20BD\u20AC\\$\xA3\xA5\u058F\u20B8\u20BA\u20B4\u20B9\u20A9";
+      const numberPattern = "\\d[\\d\\s.,]*";
+      const afterCurrency = normalizedText.match(new RegExp(`[${escapedCurrencyChars}]\\s*(${numberPattern})`));
+      const beforeCurrency = normalizedText.match(new RegExp(`(${numberPattern})\\s*[${escapedCurrencyChars}]`));
+      const rawNumber = afterCurrency && afterCurrency[1] || beforeCurrency && beforeCurrency[1] || (normalizedText.match(/(\d[\d\s.,]*)/) || [])[1] || "";
       if (!rawNumber) return null;
-      const compact = rawNumber.replace(/\s+/g, "").replace(/,(?=\d{3}\b)/g, "").replace(/\.(?=\d{3}\b)/g, "");
-      const prepared = compact.replace(",", ".");
+      const compact = rawNumber.replace(/\s+/g, "");
+      const comma = compact.lastIndexOf(",");
+      const dot = compact.lastIndexOf(".");
+      let prepared = compact;
+      if (comma >= 0 && dot >= 0) {
+        const decimalSep = comma > dot ? "," : ".";
+        const thousandsSep = decimalSep === "," ? "." : ",";
+        prepared = compact.split(thousandsSep).join("").replace(decimalSep, ".");
+      } else if (comma >= 0 || dot >= 0) {
+        const sep = comma >= 0 ? "," : ".";
+        const parts = compact.split(sep);
+        const last = parts[parts.length - 1] || "";
+        prepared = parts.length > 2 || last.length === 3 ? parts.join("") : compact.replace(sep, ".");
+      }
       const direct = /^\d+(?:\.\d+)?$/.test(prepared) ? prepared : (prepared.match(/\d+(?:\.\d+)?/) || [])[0] || "";
       if (!direct) return null;
       const value = Number(direct);
@@ -339,7 +354,7 @@
     };
   })();
 
-  // content/exporter/common.js
+  // src/content/exporter/common.js
   (() => {
     "use strict";
     const MP = window.MP;
@@ -637,7 +652,7 @@
     };
   })();
 
-  // content/exporter/ozon.js
+  // src/content/exporter/wb.js
   (() => {
     "use strict";
     const MP = window.MP;
@@ -660,826 +675,276 @@
       shouldRestoreFocus: shouldRestoreFocusMaybe = async () => true,
       showExportMark: showExportMarkMaybe = async () => false
     } = Exporter;
-    function initOzon() {
-      ensureScrollTopButton();
-      const clickVariantWhenReady = (timeout = 400) => {
-        const find = () => [...document.querySelectorAll('button,[role="button"]')].find((el) => /этот вариант товара/i.test(el.textContent?.trim()));
-        const btn = find();
-        if (btn) {
-          btn.click();
-          return Promise.resolve(true);
-        }
-        return new Promise((resolve) => {
-          const obs = new MutationObserver(() => {
-            const b = find();
-            if (b) {
-              b.click();
-              obs.disconnect();
-              resolve(true);
+    function initWB() {
+      ensureScrollTopButton({ bottom: 120 });
+      const getWBPriceNode = () => document.querySelector('[class^="priceBlockWalletPrice"], [class*=" priceBlockWalletPrice"]') || document.querySelector('ins[class^="priceBlockFinalPrice"], ins[class*=" priceBlockFinalPrice"]') || document.querySelector('span[class^="priceBlockPrice"], span[class*=" priceBlockPrice"], [class*="priceBlock"] [class*="price"], [class*="orderBlock"] [class*="price"]');
+      async function loadWBReviews(max = 100) {
+        const DELAY = 420;
+        const MAX_IDLE = 6;
+        const target = Math.max(1, Number(max) || 100);
+        let idle = 0;
+        let prev = 0;
+        while (true) {
+          const items = document.querySelectorAll("li.comments__item");
+          if (items.length >= target) break;
+          if (items.length) {
+            items[items.length - 1].scrollIntoView({ block: "end", behavior: "auto" });
+          } else {
+            window.scrollBy(0, 340);
+          }
+          window.scrollBy(0, Math.max(260, Math.round(window.innerHeight * 0.34)));
+          await sleep(DELAY);
+          const now = document.querySelectorAll("li.comments__item").length;
+          if (now === prev) {
+            idle += 1;
+            const loadNode = document.querySelector(".product-feedbacks__load");
+            if (loadNode) {
+              try {
+                loadNode.scrollIntoView({ block: "center", behavior: "auto" });
+              } catch (_) {
+              }
             }
-          });
-          obs.observe(document.body, { childList: true, subtree: true });
-          setTimeout(() => {
-            obs.disconnect();
-            resolve(false);
-          }, timeout);
-        });
-      };
-      const getRecommendationsTopY = () => {
-        const headingMarkers = [...document.querySelectorAll("h2, h3, h4")].filter((el) => /(рекомендуем|похожие товары|с этим товаром|вам может понравиться)/i.test(el.textContent || "")).map((el) => window.scrollY + el.getBoundingClientRect().top);
-        const widgetMarkers = [...document.querySelectorAll('[data-widget*="recommend" i], [data-widget*="similar" i]')].map((el) => window.scrollY + el.getBoundingClientRect().top);
-        const candidates = [...headingMarkers, ...widgetMarkers].filter((y) => Number.isFinite(y) && y > window.scrollY + 180).sort((a, b) => a - b);
-        return candidates.length ? candidates[0] : Infinity;
-      };
-      const pickClosestForwardNode = (nodes, options = {}) => {
-        const list = (nodes || []).filter(Boolean);
-        if (!list.length) return null;
-        const minDocY = Number.isFinite(Number(options.minDocY)) ? Number(options.minDocY) : Math.max(0, window.scrollY - Math.round(window.innerHeight * 0.75));
-        const maxDocY = Number.isFinite(Number(options.maxDocY)) ? Number(options.maxDocY) : Infinity;
-        const withPos = list.map((el) => ({ el, y: window.scrollY + el.getBoundingClientRect().top })).filter((x) => Number.isFinite(x.y));
-        const below = withPos.filter((x) => x.y >= minDocY && x.y <= maxDocY).sort((a, b) => a.y - b.y);
-        if (below.length) return below[0].el;
-        return null;
-      };
-      const findReviewHeaderNode = () => {
-        const maxDocY = getRecommendationsTopY();
-        const direct = pickClosestForwardNode([
-          ...document.querySelectorAll('[data-widget="webListReviews"], #section-reviews, [id*="section-reviews" i]')
-        ], { maxDocY });
-        if (direct) return direct;
-        const byCard = pickClosestForwardNode([...document.querySelectorAll("[data-review-uuid]")], { maxDocY });
-        return byCard ? byCard.closest("[data-widget], section, article, div") || byCard : null;
-      };
-      const findDescriptionSection = () => {
-        const maxDocY = getRecommendationsTopY();
-        const direct = pickClosestForwardNode([
-          ...document.querySelectorAll('[data-widget="webDescription"], #section-description, [id*="section-description"]')
-        ], { maxDocY });
-        if (direct) return direct;
-        return pickClosestForwardNode(
-          [...document.querySelectorAll("h2, h3")].filter((n) => /^\s*(описание|о товаре)\s*$/i.test(n.textContent || "")),
-          { maxDocY }
-        );
-      };
-      const findCharacteristicsSection = () => {
-        const maxDocY = getRecommendationsTopY();
-        const direct = pickClosestForwardNode([
-          ...document.querySelectorAll('#section-characteristics, [id*="section-characteristics" i], [data-widget="webCharacteristics"], [data-widget*="characteristics" i]')
-        ], { maxDocY });
-        if (direct) return direct;
-        return pickClosestForwardNode(
-          [...document.querySelectorAll("h2, h3")].filter((n) => /^\s*характеристик/i.test(n.textContent || "")),
-          { maxDocY }
-        );
-      };
-      const stepPageDown = async (stepRatio = 0.32, delay = 300, smoothScroll = true) => {
-        const delta = Math.max(240, Math.round(window.innerHeight * stepRatio));
-        if (smoothScroll) {
-          window.scrollBy({ top: delta, behavior: "smooth" });
-        } else {
-          window.scrollBy(0, delta);
+            if (idle >= MAX_IDLE) break;
+          } else {
+            prev = now;
+            idle = 0;
+          }
         }
-        await sleep(delay);
+        return [...document.querySelectorAll("li.comments__item")].slice(0, target);
+      }
+      const normalizeText = (value) => String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+      const getReviewVariantTiles = (root) => {
+        if (!root) return [];
+        const scope = root.querySelector('.feedbacksColors--NtFag, [class*="feedbacksColors"], [class*="swiperColors"]') || root;
+        return [...scope.querySelectorAll(".swiper-wrapper > .swiper-slide:not(.swiper-slide-duplicate)")].map((slide) => slide.querySelector(':scope > div[class*="feedbacksColorsItem"]') || slide.querySelector('div[class*="feedbacksColorsItem"]')).filter((tile) => !!tile && !!tile.querySelector('.option--AtxKZ, [class*="option"]'));
       };
-      const scrollToElementProgressive = async (el, options = {}) => {
-        if (!el) return;
-        const block = options.block || "start";
-        const rect = el.getBoundingClientRect();
-        const topThreshold = Math.round(window.innerHeight * 0.12);
-        const bottomThreshold = Math.round(window.innerHeight * 0.88);
-        if (rect.top >= topThreshold && rect.bottom <= bottomThreshold) return;
-        el.scrollIntoView({ behavior: "smooth", block, inline: "nearest" });
-        await sleep(Number(options.settleMs) || 220);
+      const isAllVariantTile = (tile) => {
+        const cls = [...tile?.classList || []].some((c) => /^isAll--/.test(c));
+        const txt = normalizeText(tile?.querySelector('.option--AtxKZ, [class*="option"]')?.textContent || tile?.textContent || "");
+        return cls || txt === "\u0432\u0441\u0435" || txt === "all";
+      };
+      const getTileLabel = (tile) => normalizeText(tile?.querySelector('.option--AtxKZ, [class*="option"]')?.textContent || "");
+      const getReviewColors = (limit = 14) => [...document.querySelectorAll("li.comments__item")].slice(0, limit).map((el) => normalizeText(el.querySelector('.feedback__params-item--color span, [class*="feedbackParamsColor"] span')?.textContent || "")).filter(Boolean);
+      const isReviewsFilteredByLabel = (label) => {
+        const colors = getReviewColors(16);
+        if (colors.length < 4) return false;
+        const uniq = [...new Set(colors)];
+        return uniq.length === 1 && (!label || uniq[0] === label);
+      };
+      const clickVariantTile = async (tile) => {
+        if (!tile) return;
+        const targets = [
+          tile.querySelector('.option--AtxKZ, [class*="option"]'),
+          tile.querySelector("img[src], img[data-src], img[data-src-pb]"),
+          tile.querySelector('button, [role="button"]'),
+          tile,
+          tile.closest(".swiper-slide")
+        ].filter(Boolean);
+        for (const node of targets) {
+          try {
+            node.click();
+          } catch (_) {
+          }
+          await sleep(45);
+        }
+      };
+      const waitForVariantTiles = async (timeoutMs = 3600) => {
+        const started = Date.now();
+        let root = null;
+        let tiles = [];
+        while (Date.now() - started < timeoutMs) {
+          root = document.querySelector('.product-feedbacks__main-wrapper, [class*="product-feedbacks__main"]');
+          tiles = getReviewVariantTiles(root);
+          if (root && tiles.length >= 2) return { root, tiles };
+          await sleep(120);
+        }
+        return { root, tiles };
+      };
+      const switchWBReviewsToFirstSpecificVariant = async () => {
+        const { root, tiles } = await waitForVariantTiles(3800);
+        if (!root) return false;
+        if (tiles.length < 2 || !isAllVariantTile(tiles[0])) return false;
+        const target = tiles[1];
+        const label = getTileLabel(target);
+        if (!label) return false;
+        if (isReviewsFilteredByLabel(label)) return true;
+        const deadline = Date.now() + 3e3;
+        while (Date.now() < deadline) {
+          try {
+            target.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
+          } catch (_) {
+          }
+          await clickVariantTile(target);
+          await sleep(160);
+          const waitStart = Date.now();
+          while (Date.now() - waitStart < 760) {
+            if (isReviewsFilteredByLabel(label)) return true;
+            await sleep(95);
+          }
+        }
+        return isReviewsFilteredByLabel(label);
+      };
+      const getWBPidKey = () => {
+        const path = String(location.pathname || "");
+        const m = path.match(/\/catalog\/(\d{4,})\/detail/i) || path.match(/\/catalog\/(\d{4,})\/feedbacks/i);
+        return m && m[1] ? `wb:${m[1]}` : "";
       };
       const restoreCardFocus = async () => {
-        window.scrollTo({ top: 0, behavior: "smooth" });
-        await sleep(240);
+        const path = String(location.pathname || "");
+        const isFeedbacks = /\/catalog\/\d{4,}\/feedbacks/i.test(path);
+        if (!isFeedbacks) return;
+        if (window.history.length > 1) {
+          window.history.back();
+          await sleep(280);
+          return;
+        }
+        const detailPath = path.replace(/\/feedbacks(\/|$)/i, "/detail$1");
+        if (detailPath && detailPath !== path) {
+          location.assign(`${location.origin}${detailPath}${location.search || ""}`);
+        }
       };
       setRestoreFocus(restoreCardFocus);
-      const findWithPageScroll = async (finder, options = {}) => {
-        const maxSteps = Number(options.maxSteps) || 24;
-        const stepRatio = Number(options.stepRatio) || 0.32;
-        const delay = Number(options.delay) || 300;
-        let node = finder();
-        for (let i = 0; !node && i < maxSteps; i += 1) {
-          await stepPageDown(stepRatio, delay, true);
-          node = finder();
-        }
-        return node || null;
-      };
-      const gotoSection = async (finder, options = {}) => {
-        const node = await findWithPageScroll(finder, options);
-        if (!node) return null;
-        await scrollToElementProgressive(node, {
-          block: options.block || "center",
-          stepRatio: options.stepRatio || 0.45,
-          delay: options.delay || 180,
-          maxHops: options.maxHops || 20,
-          settleMs: options.settleMs || 240
-        });
-        return node;
-      };
-      const parseRatingValue = (text) => {
-        const m = String(text || "").replace(",", ".").match(/\b([0-5](?:\.\d)?)\b/);
-        return m ? m[1] : "\u2014";
-      };
-      const parseCount = (text) => {
-        const m = String(text || "").replace(/\u00A0/g, " ").match(/(\d[\d\s]{0,8})\s*(оцен|отзыв)/i);
-        if (!m) return 0;
-        return parseInt(m[1].replace(/\s+/g, ""), 10) || 0;
-      };
-      const clickExpandButtons = (root) => {
-        if (!root) return;
-        [...root.querySelectorAll('button, a, [role="button"]')].forEach((el) => {
-          const t = (el.textContent || "").toLowerCase().trim();
-          if (/ещё|еще|показать|развернуть|подробнее|читать полностью|more|show/i.test(t)) el.click();
-        });
-      };
-      const getScrollableCandidates = (root) => {
-        if (!root) return [];
-        const all = [root, ...root.querySelectorAll("*")];
-        return all.filter((el) => {
-          const max = el.scrollHeight - el.clientHeight;
-          if (max <= 90) return false;
-          const style = getComputedStyle(el);
-          const overflowY = String(style.overflowY || "").toLowerCase();
-          return /(auto|scroll|overlay)/.test(overflowY) || max > 400;
-        }).sort((a, b) => b.scrollHeight - b.clientHeight - (a.scrollHeight - a.clientHeight)).slice(0, 8);
-      };
-      const scrollInsideElement = async (el) => {
-        if (!el) return;
-        const max = el.scrollHeight - el.clientHeight;
-        if (max <= 20) return;
-        const step = Math.max(140, Math.floor(el.clientHeight * 0.6));
-        for (let y = 0; y <= max; y += step) {
-          el.scrollTo({ top: y, behavior: "auto" });
-          await sleep(130);
-        }
-        el.scrollTo({ top: max, behavior: "auto" });
-      };
-      async function collectInfo() {
-        window.scrollTo({ top: 0, behavior: "auto" });
-        await sleep(180);
+      async function buildWBExportPackage(opts = {}) {
+        const includeReviews = opts.includeReviews !== false;
+        const switchToVariant = opts.switchToVariant !== false;
         const url = location.href;
-        const heading = await wait('[data-widget="webProductHeading"]', 12e3).catch(() => null);
-        const title = heading?.querySelector("h1")?.innerText.trim() || document.querySelector("h1")?.innerText.trim() || "\u2014";
-        const normalizeQuotes = (value) => String(value || "").replace(/[`´‘’‛ʼʻʹʽꞌ＇]/g, "'").replace(/[“”„«»]/g, '"');
-        const clean = (value) => normalizeQuotes(value).replace(/\s+/g, " ").trim();
-        const normalizeForCompare = (value) => clean(value).toLowerCase().replace(/['"]/g, "").replace(/[^a-zа-яё0-9]+/gi, " ").trim();
-        const normalizeEntityText = (value) => clean(value).replace(/\s*Бренд\s*•.*$/i, "").replace(/\s*Витрина бренда.*$/i, "").replace(/\s*О магазине.*$/i, "").replace(/\s*Подписаться.*$/i, "").replace(/\s*Перейти.*$/i, "").trim();
-        const isMissing = (value) => !value || value === "\u2014";
-        const isNoiseValue = (value) => {
-          const t = clean(value);
-          if (!t) return true;
-          if (/^(бренд|магазин|подписаться|перейти|о магазине|оригинал|все товары|перейти к описанию|заказы|чат|подтвержд[её]нные бренды)$/i.test(t)) return true;
-          if (/бренд\s*•|витрина бренда|подписаться|о магазине|перейти к|подтвержд[её]нные бренды/i.test(t)) return true;
-          return false;
-        };
-        const isValidEntity = (value) => {
-          const t = normalizeEntityText(value);
-          if (!t || isNoiseValue(t)) return false;
-          if (!/[a-zа-яё]/i.test(t)) return false;
-          if (t.length > 60) return false;
-          return true;
-        };
-        const normalizeFactLabel = (value) => clean(value).replace(/[:\s]+$/, "").trim();
-        const getDescriptionFactRows = (maxDocY = Infinity) => {
-          const rows = [];
-          const nodes = [...document.querySelectorAll('[data-widget="webDescription"], #section-description, [id*="section-description"]')];
-          const roots = [...new Set(nodes.map((node) => node.closest('[data-widget="webDescription"]') || node).filter((node) => {
-            const y = window.scrollY + node.getBoundingClientRect().top;
-            return Number.isFinite(y) && y <= maxDocY;
-          }))];
-          roots.forEach((root) => {
-            root.querySelectorAll("h3").forEach((h) => {
-              const k = normalizeFactLabel(h.innerText || h.textContent || "");
-              if (!k || /^(описание|о товаре|характеристики)$/i.test(k)) return;
-              let next = h.nextElementSibling;
-              while (next && /^script|style$/i.test(next.tagName || "")) {
-                next = next.nextElementSibling;
-              }
-              const v = clean(next?.innerText || next?.textContent || "");
-              if (v && k !== v && v.length <= 2e3) rows.push(`${k}: ${v}`);
+        const header = document.querySelector('[class^="productHeaderWrap"], .product-page__header-wrap') || document;
+        const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+        const digits = (value) => String(value || "").replace(/[^\d]/g, "");
+        const normalizeBrand = (value) => clean(value).replace(/\s*В каталог бренда.*$/i, "").replace(/^\s*бренд[:\s]*/i, "").trim();
+        const brand = normalizeBrand(
+          header.querySelector('[class*="productHeaderBrandText"]')?.textContent || header.querySelector('a[href*="/brands/"] [class*="typography"]')?.textContent || header.querySelector('a[href*="/brands/"]')?.textContent || document.querySelector('[class*="productHeaderBrandText"]')?.textContent || document.querySelector('[class*="productHeader"] a[href*="/brands/"] [class*="typography"]')?.textContent || document.querySelector('[class*="productHeader"] a[href*="/brands/"]')?.textContent || document.querySelector(".product-page__brand-name")?.textContent || document.querySelector('[class*="categoryLinkBrand"]')?.textContent || "\u2014"
+        );
+        const titleNode = document.querySelector('[class^="productTitle"], [class*=" productTitle"], .product-page__title');
+        const title = clean(titleNode?.innerText || titleNode?.textContent || "\u2014");
+        const shop = clean(
+          document.querySelector('[class*="sellerInfoNameDefaultText"]')?.textContent || document.querySelector('[class*="sellerInfoName"] [class*="typography"]')?.textContent || document.querySelector('[class*="sellerInfo"] a[href*="/seller/"] [class*="typography"]')?.textContent || "\u2014"
+        );
+        const original = document.querySelector('[class^="productHeader"] [class*="original"]') ? "\u0414\u0430" : "\u2014";
+        const ratingText = clean(
+          document.querySelector('[class*="productReviewRating"]')?.textContent || document.querySelector('[class*="ReviewRating"]')?.textContent || document.querySelector('[data-qaid="product-review-rating"]')?.textContent || ""
+        );
+        const rating = ratingText.match(/\b([0-5](?:[.,]\d)?)\b/)?.[1] || clean(document.querySelector('[itemprop="ratingValue"]')?.textContent) || "\u2014";
+        const reviewsTotal = digits(
+          ratingText.match(/(\d[\d\s\u00A0]*)\s*оцен/i)?.[1] || document.querySelector('[class*="ReviewCount"]')?.textContent || document.querySelector('[data-qaid="product-review-count"]')?.textContent || document.querySelector('[itemprop="reviewCount"]')?.textContent || "0"
+        ) || "0";
+        const reviewsLink = document.querySelector(
+          'a[class^="productReview"], a.product-review, #product-feedbacks a.comments__btn-all, #product-feedbacks a.user-opinion__text, a[href*="/feedbacks"]'
+        );
+        const priceNode = getWBPriceNode();
+        let price = "\u2014";
+        if (priceNode) {
+          const raw = priceNode.textContent.replace(/\s+/g, "");
+          price = raw.replace(/([₽€$])/, " $1");
+        }
+        const showBtn = [...document.querySelectorAll("button, a")].find((el) => /характеристик|описани/i.test(el.innerText));
+        if (showBtn) {
+          showBtn.click();
+          await sleep(400);
+        }
+        const popup = [...document.querySelectorAll('[role="dialog"], .popup-product-details, [data-testid="product_additional_information"], section')].find((n) => /Характеристики|описание/i.test(n.innerText || ""));
+        let chars = "\u2014", descr = "\u2014";
+        if (popup) {
+          const rowTexts = [];
+          popup.querySelectorAll("table").forEach((tbl) => {
+            tbl.querySelectorAll("tr").forEach((tr) => {
+              const k = (tr.querySelector('th, [class*="cellDecor"], [class*="cellWrapper"]')?.innerText || "").replace(/[:\s]+$/, "").trim();
+              const v = (tr.querySelector('td, [class*="cellValue"], [data-value]')?.innerText || "").trim();
+              if (k && v && k.toLowerCase() !== v.toLowerCase()) rowTexts.push(`${k}: ${v}`);
             });
           });
-          return rows;
-        };
-        const textOf = (el) => clean(el?.innerText || el?.textContent || "");
-        const getDescriptionRoot = (section) => {
-          if (!section) return null;
-          return section.closest?.('[data-widget="webDescription"]') || section.querySelector?.('[data-widget="webDescription"]') || section.closest?.('#section-description, [id*="section-description"]') || section.querySelector?.('#section-description, [id*="section-description"]') || section;
-        };
-        const extractDescriptionFromRoot = (root) => {
-          if (!root) return { text: "", images: [] };
-          const scope = root.querySelector?.('#section-description, [id*="section-description"]') || root;
-          const candidates = [
-            ...scope.querySelectorAll?.("p, [class], div") || []
-          ].map((el) => ({ el, text: textOf(el) })).filter(({ el, text: text2 }) => {
-            if (!text2 || text2.length < 30) return false;
-            if (el.matches?.("h1, h2, h3, h4, button, a")) return false;
-            if (el.closest?.('[data-widget="webHashtags"], [data-widget="tagList"]')) return false;
-            if (/^Описание$/i.test(text2) || /^О товаре$/i.test(text2)) return false;
-            return true;
-          }).sort((a, b) => b.text.length - a.text.length);
-          const rawText = candidates[0]?.text || textOf(scope);
-          const text = rawText.replace(/^\s*Описание\s*/i, "").replace(/^\s*О\s*товаре\s*/i, "").replace(/\n{3,}/g, "\n\n").trim();
-          const images = [...scope.querySelectorAll?.("img[src], img[data-src], source[srcset]") || []].map((img) => img.getAttribute("src") || img.getAttribute("data-src") || img.getAttribute("srcset") || "").map((raw) => String(raw || "").split(/\s+/)[0].trim()).filter(Boolean);
-          return { text, images: [...new Set(images)] };
-        };
-        const findLoadedDescriptionRoot = () => getDescriptionRoot(document.querySelector(
-          '[data-widget="webDescription"], #section-description, [id*="section-description"]'
-        ));
-        const getCharacteristicsRoot = (section) => {
-          if (!section) return null;
-          const direct = section.closest?.('[data-widget="webCharacteristics"], #section-characteristics, [id*="section-characteristics" i]') || section.querySelector?.('[data-widget="webCharacteristics"], #section-characteristics, [id*="section-characteristics" i]');
-          if (direct) return direct;
-          let cur = section;
-          for (let i = 0; cur && i < 6; i += 1, cur = cur.parentElement) {
-            if (cur.querySelector?.("dl dt, dl dd, tr th, tr td")) return cur;
-          }
-          return section;
-        };
-        const readCharacteristicsRows = (root) => {
-          if (!root) return { rows: [], brandFromChars: "" };
-          const rows = [];
-          let brandValue = "";
-          root.querySelectorAll("dl").forEach((dl) => {
-            const k = normalizeFactLabel(dl.querySelector("dt")?.innerText || dl.querySelector("dt")?.textContent || "");
-            const v = textOf(dl.querySelector("dd"));
-            if (k && v) rows.push(`${k}: ${v}`);
-            if (!brandValue && /^бренд$/i.test(k) && isValidEntity(v)) {
-              brandValue = normalizeEntityText(v);
-            }
+          popup.querySelectorAll(".product-params__row").forEach((r) => {
+            const k = (r.querySelector("th")?.innerText || "").replace(/[:\s]+$/, "").trim();
+            const v = (r.querySelector("td")?.innerText || "").trim();
+            if (k && v && k.toLowerCase() !== v.toLowerCase()) rowTexts.push(`${k}: ${v}`);
           });
-          root.querySelectorAll("tr").forEach((tr) => {
-            const k = normalizeFactLabel(tr.querySelector("th, td:first-child")?.innerText || tr.querySelector("th, td:first-child")?.textContent || "");
-            const v = textOf(tr.querySelector("td:last-child"));
-            if (k && v && k !== v) rows.push(`${k}: ${v}`);
-            if (!brandValue && /^бренд$/i.test(k) && isValidEntity(v)) {
-              brandValue = normalizeEntityText(v);
-            }
-          });
-          return { rows, brandFromChars: brandValue };
-        };
-        const findLoadedCharacteristicsRoot = () => getCharacteristicsRoot(document.querySelector(
-          '[data-widget="webCharacteristics"], #section-characteristics, [id*="section-characteristics" i], [data-widget*="characteristics" i]'
-        ));
-        const scoreEntityNode = (el, text, hint = "") => {
-          const cls = String(el?.className || "").toLowerCase();
-          const href = String(el?.getAttribute?.("href") || "").toLowerCase();
-          let score = 0;
-          if (hint === "brand" && /\/brand\//.test(href)) score += 60;
-          if (hint === "shop" && /\/(seller|shop|store|brand)\//.test(href)) score += 50;
-          if (/seller|shop|store|brand|b35_3_22-b7|compactcontrol500|control500/.test(cls)) score += 30;
-          if (/^[A-ZА-ЯЁ0-9 .&'`_-]+$/u.test(text)) score += 12;
-          const words = text.split(/\s+/).length;
-          if (words <= 3) score += 8;
-          if (words > 6) score -= 20;
-          if (/подпис|перейти|оригинал|бренд\s*•|витрина|заказы|чат|достав|в корзин/i.test(text)) score -= 60;
-          return score;
-        };
-        const pickBestEntityText = (nodes, hint = "") => {
-          const candidates = (nodes || []).map((el) => {
-            const text = normalizeEntityText(el?.textContent || el?.innerText || "");
-            return { el, text };
-          }).filter((x) => isValidEntity(x.text)).map((x) => ({ ...x, score: scoreEntityNode(x.el, x.text, hint) })).sort((a, b) => b.score - a.score || a.text.length - b.text.length);
-          return candidates[0]?.text || "";
-        };
-        const getBrandFromHeaderBlock = () => {
-          const bwrap = document.querySelector('[data-widget="webBrand"]');
-          if (!bwrap) return "";
-          const fromBrandLink = pickBestEntityText([...bwrap.querySelectorAll('a[href*="/brand/"]')], "brand");
-          if (fromBrandLink) return fromBrandLink;
-          const fromNodes = pickBestEntityText(
-            [...bwrap.querySelectorAll('[class*="CompactControl500" i], [class*="Control500" i], [class*="title" i], span, a')],
-            "brand"
-          );
-          if (fromNodes) return fromNodes;
-          const href = bwrap.querySelector('a[href*="/brand/"]')?.getAttribute("href") || "";
-          const slugMatch = href.match(/\/brand\/([^/?#]+)/i);
-          if (!slugMatch?.[1]) return "";
-          let fromSlug = slugMatch[1].replace(/-\d+$/, "").replace(/-/g, " ").trim();
-          if (/^[a-z0-9 ]+$/i.test(fromSlug) && fromSlug.split(/\s+/).length <= 3) {
-            fromSlug = fromSlug.toUpperCase();
-          }
-          return fromSlug;
-        };
-        const getBrandFromMeta = () => clean(
-          document.querySelector('meta[itemprop="brand"]')?.getAttribute("content") || document.querySelector('meta[name="brand"]')?.getAttribute("content") || ""
-        );
-        const getBrandFromBreadcrumbByTitle = () => {
-          const titleNorm = normalizeForCompare(title);
-          if (!titleNorm) return "";
-          const crumbs = [...document.querySelectorAll('[data-widget="breadCrumbs"] li span')].map((n) => clean(n.textContent || "")).filter((t) => isValidEntity(t));
-          for (let i = crumbs.length - 1; i >= 0; i -= 1) {
-            const candidate = crumbs[i];
-            const candNorm = normalizeForCompare(candidate);
-            if (!candNorm || candNorm.length < 3) continue;
-            if (titleNorm.includes(candNorm)) return candidate;
-          }
-          return "";
-        };
-        const getShopName = () => {
-          const bySellerWidget = pickBestEntityText([
-            ...document.querySelectorAll('[data-widget*="seller" i] a, [data-widget*="seller" i] [class*="name" i], [data-widget*="shop" i] a, [class*="sellerInfo" i] a, [class*="sellerInfo" i] [class*="name" i]')
-          ]);
-          if (bySellerWidget) return bySellerWidget;
-          const shopHeader = [...document.querySelectorAll("h2, h3, span, div")].find((el) => /^магазин$/i.test(clean(el.textContent || "")));
-          if (!shopHeader) return "";
-          const base = shopHeader.closest("div") || shopHeader.parentElement;
-          const scopes = [];
-          if (base) {
-            scopes.push(base);
-            if (base.parentElement) scopes.push(base.parentElement);
-            let sib = base.nextElementSibling;
-            for (let i = 0; sib && i < 5; i += 1) {
-              scopes.push(sib);
-              sib = sib.nextElementSibling;
-            }
-            if (base.parentElement?.nextElementSibling) scopes.push(base.parentElement.nextElementSibling);
-          }
-          for (const scope of [...new Set(scopes.filter(Boolean))]) {
-            const fromScope = pickBestEntityText([
-              ...scope.querySelectorAll('a[href*="/seller/"], a[href*="/shop/"], a[href*="/store/"], a[href*="/brand/"]'),
-              ...scope.querySelectorAll('[class*="b35_3_22-b7" i], [class*="seller" i] [class*="name" i], [class*="shop" i] [class*="name" i], span, a')
-            ], "shop");
-            if (fromScope) return fromScope;
-          }
-          return "";
-        };
-        let brand = getBrandFromHeaderBlock() || getBrandFromMeta() || "";
-        if (isMissing(brand)) brand = getBrandFromBreadcrumbByTitle() || "";
-        let shop = getShopName() || "\u2014";
-        const origMark = document.querySelector('[data-widget="webBrand"] svg path[fill]') ? "\u0414\u0430" : "\u2014";
-        const pWrap = await wait('[data-widget="webPrice"]', 12e3).catch(() => null);
-        const priceNode = [...pWrap?.querySelectorAll("span, div") || []].find((el) => /[₽$€]/.test(el.textContent || "") && /\d/.test(el.textContent || ""));
-        const price = priceNode?.innerText.replace(/\s+/g, " ").trim() || "\u2014";
-        const unit = [...pWrap?.querySelectorAll("div, span") || []].map((d) => (d.innerText || "").trim()).find((t) => /за\s*\d*\s*(шт|г|гр|кг|мл|л)\b/i.test(t)) || "";
-        const scoreNode = document.querySelector('[data-widget="webSingleProductScore"], [data-widget="webReviewScore"], [itemprop="aggregateRating"]');
-        const avgRating = parseRatingValue(
-          document.querySelector('[itemprop="ratingValue"]')?.textContent || scoreNode?.textContent || heading?.textContent || ""
-        );
-        const reviewsTotal = parseCount(
-          document.querySelector('[itemprop="reviewCount"]')?.textContent || scoreNode?.textContent || heading?.textContent || ""
-        );
-        let desc = "\u2014";
-        const descSection = await gotoSection(
-          () => findDescriptionSection(),
-          { maxSteps: 10, stepRatio: 0.32, delay: 280, settleMs: 220, block: "start" }
-        );
-        if (descSection) {
-          const descRoot = getDescriptionRoot(descSection);
-          clickExpandButtons(descRoot);
-          await sleep(260);
-          const scrollables = getScrollableCandidates(descRoot);
-          for (const sc of scrollables) await scrollInsideElement(sc);
-          const { text, images: uniqImages } = extractDescriptionFromRoot(descRoot);
-          if (text && text.length >= 30) {
-            desc = text;
-            if (uniqImages.length >= 3) {
-              desc += `
-
-[\u0418\u043B\u043B\u044E\u0441\u0442\u0440\u0430\u0446\u0438\u0438 longread: ${uniqImages.length} \u0448\u0442.]`;
-            }
-          } else if (uniqImages.length) {
-            const shown = uniqImages.slice(0, 30).map((u) => `- ${u}`);
-            desc = `\u041B\u043E\u043D\u0433\u0440\u0438\u0434-\u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u0432 \u0438\u0437\u043E\u0431\u0440\u0430\u0436\u0435\u043D\u0438\u044F\u0445 (${uniqImages.length} \u0448\u0442.):
-${shown.join("\n")}`;
-          }
+          if (rowTexts.length) chars = rowTexts.join("\n");
+          const descSection = popup.querySelector('#section-description, [id*="section-description"]');
+          const descNode = descSection?.querySelector("p, div") || [...popup.querySelectorAll("h3, h2, h4")].find((h) => /описани/i.test(h.textContent || ""))?.nextElementSibling;
+          if (descNode) descr = descNode.innerText.trim();
         }
-        if (isMissing(desc)) {
-          const { text, images: uniqImages } = extractDescriptionFromRoot(findLoadedDescriptionRoot());
-          if (text && text.length >= 30) {
-            desc = text;
-          } else if (uniqImages.length) {
-            const shown = uniqImages.slice(0, 30).map((u) => `- ${u}`);
-            desc = `\u041B\u043E\u043D\u0433\u0440\u0438\u0434-\u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u0432 \u0438\u0437\u043E\u0431\u0440\u0430\u0436\u0435\u043D\u0438\u044F\u0445 (${uniqImages.length} \u0448\u0442.):
-${shown.join("\n")}`;
-          }
-        }
-        let chars = "\u2014";
-        let brandFromChars = "";
-        let cSec = await gotoSection(
-          () => findCharacteristicsSection(),
-          { maxSteps: 22, stepRatio: 0.32, delay: 280, settleMs: 240, block: "start" }
-        );
-        if (cSec) {
-          const parsed = readCharacteristicsRows(getCharacteristicsRoot(cSec));
-          const rows = parsed.rows;
-          brandFromChars = parsed.brandFromChars;
-          rows.push(...getDescriptionFactRows(window.scrollY + cSec.getBoundingClientRect().top));
-          const uniqRows = [...new Set(rows.filter(Boolean))];
-          if (uniqRows.length) chars = uniqRows.join("\n");
-        } else {
-          const descFactRows = [...new Set(getDescriptionFactRows(getRecommendationsTopY()).filter(Boolean))];
-          if (descFactRows.length) chars = descFactRows.join("\n");
-        }
-        if (isMissing(chars)) {
-          const parsed = readCharacteristicsRows(findLoadedCharacteristicsRoot());
-          if (!brandFromChars) brandFromChars = parsed.brandFromChars;
-          const uniqRows = [...new Set(parsed.rows.filter(Boolean))];
-          if (uniqRows.length) chars = uniqRows.join("\n");
-        }
-        if (isMissing(brand) && brandFromChars) brand = brandFromChars;
-        brand = normalizeEntityText(brand);
-        shop = normalizeEntityText(shop);
-        if (!isValidEntity(brand)) brand = "\u2014";
-        if (!isValidEntity(shop)) shop = "\u2014";
-        return { url, title, brand, shop, origMark, price, unit, avgRating, reviewsTotal, desc, chars };
-      }
-      async function loadReviews(max = 100, opts = {}) {
-        const switchToVariant = opts.switchToVariant === true;
-        const avgFromInfo = opts.avgRating || "\u2014";
-        const declaredFromInfo = Number(opts.reviewsTotal) || 0;
-        const noProgressTimeoutMs = 3e3;
-        const reviewHeaderNode = await gotoSection(
-          () => findReviewHeaderNode(),
-          { maxSteps: 32, stepRatio: 0.34, delay: 280, settleMs: 260, block: "start" }
-        );
-        if (!reviewHeaderNode) return { header: `\u041E\u0442\u0437\u044B\u0432\u044B: \u043D\u0435\u0442 \u043E\u0442\u0437\u044B\u0432\u043E\u0432. \u0421\u0440\u0435\u0434\u043D\u044F\u044F \u043E\u0446\u0435\u043D\u043A\u0430: ${avgFromInfo}`, items: [] };
-        const reviewSectionSelector = '[data-widget="webListReviews"], #section-reviews, [id*="section-reviews" i]';
-        const reviewNodesSelector = "[data-review-uuid], [data-review-id]";
-        const resolveReviewSection = (seed = null) => {
-          const rooted = seed?.closest(reviewSectionSelector) || seed || null;
-          const candidates = [...document.querySelectorAll(reviewSectionSelector)];
-          const scored = candidates.map((el) => ({
-            el,
-            count: el.querySelectorAll(reviewNodesSelector).length,
-            top: Math.abs(el.getBoundingClientRect().top)
-          })).sort((a, b) => b.count - a.count || a.top - b.top);
-          if (scored.length && scored[0].count > 0) return scored[0].el;
-          return rooted || null;
-        };
-        let reviewSection = resolveReviewSection(reviewHeaderNode);
-        if (!reviewSection) return { header: `\u041E\u0442\u0437\u044B\u0432\u044B: \u043D\u0435\u0442 \u043E\u0442\u0437\u044B\u0432\u043E\u0432. \u0421\u0440\u0435\u0434\u043D\u044F\u044F \u043E\u0446\u0435\u043D\u043A\u0430: ${avgFromInfo}`, items: [] };
-        await sleep(160);
-        if (switchToVariant) {
-          await clickVariantWhenReady();
-          await sleep(600);
-        }
-        reviewSection = resolveReviewSection(reviewSection) || reviewSection;
-        const refreshReviewSection = () => {
-          const direct = resolveReviewSection(reviewSection);
-          if (direct) {
-            reviewSection = direct;
-            return reviewSection;
-          }
-          const fallback = document.querySelector(reviewSectionSelector);
-          if (fallback) {
-            reviewSection = fallback;
-            return reviewSection;
-          }
-          return reviewSection;
-        };
-        const declared = parseCount(reviewSection.textContent || "") || declaredFromInfo;
-        const requestedMax = Number.isFinite(Number(max)) ? Math.max(1, Math.floor(Number(max))) : 100;
-        const targetCount = Math.min(100, requestedMax);
-        const moreBtn = () => {
-          const roots = [refreshReviewSection(), document];
-          for (const root of roots) {
-            if (!root) continue;
-            const found = [...root.querySelectorAll('button, [role="button"], a[role="button"], a')].find((b) => {
-              const text = (b.innerText || "").toLowerCase();
-              const r = b.getBoundingClientRect();
-              if (r.bottom < 0 || r.top > window.innerHeight) return false;
-              if (!/(ещё|еще|показать|следующ|загрузить|больше|more)/i.test(text)) return false;
-              if (!/(отзыв|коммент|review)/i.test(text)) return false;
-              return true;
-            });
-            if (found) return found;
-          }
-          return null;
-        };
-        const isLikelyRatingSvg = (svg) => {
-          if (!svg) return false;
-          const path = svg.querySelector("path");
-          const width = Number(svg.getAttribute("width") || 0);
-          const height = Number(svg.getAttribute("height") || 0);
-          const viewBox = String(svg.getAttribute("viewBox") || "").trim();
-          const raw = [
-            svg.getAttribute("style") || "",
-            svg.getAttribute("color") || "",
-            svg.style?.color || "",
-            path?.getAttribute("fill") || "",
-            path?.getAttribute("style") || ""
-          ].join(" ").toLowerCase();
-          if (/graphicrating|graphictertiary|graphicneutral|disabled/.test(raw)) return true;
-          if (width === 20 && height === 20 && viewBox === "0 0 24 24") return true;
-          const d = String(path?.getAttribute("d") || "").replace(/\s+/g, "");
-          if (d.startsWith("M9.3586.136C10.53")) return true;
-          return d.includes("2.6433.136") && d.includes("3.8421.457");
-        };
-        const isFilledStarSvg = (svg) => {
-          if (!svg) return null;
-          if (!isLikelyRatingSvg(svg)) return null;
-          const path = svg.querySelector("path");
-          const raw = [
-            svg.getAttribute("style") || "",
-            svg.getAttribute("color") || "",
-            svg.style?.color || "",
-            path?.getAttribute("fill") || "",
-            path?.getAttribute("style") || ""
-          ].join(" ").toLowerCase();
-          if (raw.includes("graphicrating")) return true;
-          if (raw.includes("graphictertiary") || raw.includes("graphicneutral") || raw.includes("disabled")) return false;
-          const computed = getComputedStyle(svg).color || "";
-          const m = computed.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
-          if (m) {
-            const r = Number(m[1]);
-            const g = Number(m[2]);
-            const b = Number(m[3]);
-            if (r > 150 && g > 120 && b < 140) return true;
-            if (Math.abs(r - g) < 18 && Math.abs(g - b) < 18) return false;
-          }
-          return null;
-        };
-        const parseRatingFromStarsContainer = (container) => {
-          if (!container) return null;
-          const stars = [...container.querySelectorAll(":scope > svg")].filter((svg) => isLikelyRatingSvg(svg)).slice(0, 5);
-          if (!stars.length || stars.length > 5) return null;
-          let filled = 0;
-          let unknown = 0;
-          stars.forEach((svg) => {
-            const state = isFilledStarSvg(svg);
-            if (state === true) filled += 1;
-            else if (state === null) unknown += 1;
-          });
-          if (filled >= 1 && filled <= 5) return String(filled);
-          if (filled === 0 && unknown > 0 && stars.length >= 1 && stars.length <= 5) return String(stars.length);
-          return null;
-        };
-        const getRatingContainers = (n) => {
-          const preferredRoots = [
-            n.querySelector('[class*="vk0_"]'),
-            n.querySelector('[class*="rating" i]'),
-            n.querySelector('[aria-label*="\u0440\u0435\u0439\u0442\u0438\u043D\u0433" i]'),
-            n
-          ].filter(Boolean);
-          const out = [];
-          preferredRoots.forEach((root) => {
-            [...root.querySelectorAll("div, span")].filter((el) => {
-              const svgs = el.querySelectorAll(":scope > svg");
-              if (!svgs.length || svgs.length > 5) return false;
-              return [...svgs].every((svg) => isLikelyRatingSvg(svg));
-            }).forEach((el) => out.push(el));
-          });
-          return [...new Set(out)];
-        };
-        const extractReviewRating = (n) => {
-          const data = n.getAttribute("data-rate") || n.getAttribute("data-rating") || "";
-          if (/^[0-5](?:[.,]\d)?$/.test(String(data).trim())) return String(data).replace(",", ".");
-          const aria = n.querySelector('[aria-label*="\u0438\u0437 5" i], [aria-label*="/5"]')?.getAttribute("aria-label") || "";
-          const ariaMatch = aria.match(/([0-5](?:[.,]\d)?)/);
-          if (ariaMatch) return ariaMatch[1].replace(",", ".");
-          const directFilled = n.querySelectorAll('svg[style*="graphicRating" i]').length;
-          if (directFilled >= 1 && directFilled <= 5) return String(directFilled);
-          const containers = getRatingContainers(n);
-          for (const container of containers) {
-            const parsed = parseRatingFromStarsContainer(container);
-            if (parsed) return parsed;
-          }
-          const allLikelyStars = [...n.querySelectorAll("svg")].filter((svg) => isLikelyRatingSvg(svg));
-          if (allLikelyStars.length >= 1 && allLikelyStars.length <= 5) return String(allLikelyStars.length);
-          const textMatch = (n.textContent || "").match(/\b([1-5](?:[.,]\d)?)\s*(?:из\s*5|\/\s*5|★)/i);
-          if (textMatch) return textMatch[1].replace(",", ".");
-          return "\u2014";
-        };
-        const getDate = (n) => {
-          const attrNode = n.getAttribute("publishedat") || n.getAttribute("publishedAt") || n.querySelector("[publishedat]")?.getAttribute("publishedat") || n.querySelector("[datetime]")?.getAttribute("datetime") || n.querySelector("time")?.getAttribute("datetime");
-          if (attrNode) {
-            if (/^\d{10,13}$/.test(attrNode)) {
-              const ms = attrNode.length === 13 ? +attrNode : +attrNode * 1e3;
-              return new Date(ms).toLocaleDateString("ru-RU");
-            }
-            const iso = attrNode.match(/^\d{4}-\d{2}-\d{2}/)?.[0];
-            if (iso) {
-              const [y, m, d] = iso.split("-");
-              return `${d}.${m}.${y}`;
-            }
-          }
-          const maybe = [...n.querySelectorAll("div, span, time")].map((el) => el.textContent.trim().match(/\d{1,2}\s+\D+\s+\d{4}|\d{1,2}[.\/-]\d{1,2}[.\/-]\d{4}/)?.[0]).find(Boolean);
-          return maybe || "\u2014";
-        };
-        const getText = (n) => {
-          const findPart = (label) => {
-            const h = [...n.querySelectorAll("div, span, p")].find((el) => (el.textContent || "").trim().toLowerCase() === label);
-            return h ? h.parentElement?.querySelector("span, div, p")?.innerText.trim() : "";
-          };
-          const looksLikeAuthorName = (raw) => {
-            const t = String(raw || "").replace(/\s+/g, " ").trim();
-            if (!t) return false;
-            if (/[!?;:]/.test(t)) return false;
-            if (/\d/.test(t)) return false;
-            if (t.length > 40) return false;
-            if (/^[A-ZА-ЯЁ][a-zа-яё]{1,24}\s+[A-ZА-ЯЁ]\.$/u.test(t)) return true;
-            if (/^[A-ZА-ЯЁ][a-zа-яё]{1,24}(?:\s+[A-ZА-ЯЁ][a-zа-яё]{1,24}){1,2}$/u.test(t)) return true;
-            if (/^[A-ZА-ЯЁ][a-zа-яё]{1,24}$/u.test(t)) return true;
-            return false;
-          };
-          const pros = findPart("\u0434\u043E\u0441\u0442\u043E\u0438\u043D\u0441\u0442\u0432\u0430");
-          const cons = findPart("\u043D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043A\u0438");
-          const comment = findPart("\u043A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439");
-          const parts = [];
-          if (pros) parts.push(`\u0414\u043E\u0441\u0442\u043E\u0438\u043D\u0441\u0442\u0432\u0430: ${pros}`);
-          if (cons) parts.push(`\u041D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043A\u0438: ${cons}`);
-          if (comment) parts.push(`\u041A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439: ${comment}`);
-          if (parts.length) return parts.join("; ");
-          const looksLikeDate = (t) => /^(\d{1,2}[.\/\-]\d{1,2}([.\/\-]\d{2,4})?|\d{1,2}\s+[а-яё]+\s+\d{4})$/i.test(t);
-          const span = n.querySelector('span.ro5_30, span[class*="ro5_"]');
-          if (span) {
-            const t = span.innerText.trim();
-            if (t && !looksLikeDate(t) && !looksLikeAuthorName(t)) return t;
-          }
-          const bodyNode = n.querySelector('[class*="vk1_"], [class*="review-text"], [class*="comment"]');
-          if (bodyNode) {
-            const bodyText = bodyNode.innerText.trim();
-            if (bodyText && bodyText.length >= 8 && !looksLikeAuthorName(bodyText)) return bodyText;
-          }
-          const BAD = /Вам помог|Размер|Цвет|коммент|вопрос|ответ|Похожие|Да \d+|Нет \d+|покупатель|пользователь/i;
-          const leaves = [...n.querySelectorAll("span, div, p")].filter((el) => !el.children.length && !BAD.test(el.innerText));
-          const texts = leaves.map((el) => el.innerText.trim()).filter((t) => t.length >= 8 && !looksLikeDate(t) && !looksLikeAuthorName(t));
-          texts.sort((a, b) => b.length - a.length);
-          return texts[0] || "\u2014";
-        };
-        const collected = /* @__PURE__ */ new Map();
-        const getNodeId = (n) => n?.getAttribute("data-review-uuid") || n?.getAttribute("data-review-id") || n?.getAttribute("id") || "";
-        const upsertFromNode = (n) => {
-          if (!n) return false;
-          const uuid = getNodeId(n);
-          if (!uuid) return false;
-          const next = {
-            uuid,
-            date: getDate(n),
-            ratingText: extractReviewRating(n),
-            text: getText(n).replace(/\s+/g, " "),
-            order: Number.isFinite(collected.get(uuid)?.order) ? collected.get(uuid).order : collected.size
-          };
-          if (!next.text || next.text === "\u2014") next.text = "\u0411\u0435\u0437 \u0442\u0435\u043A\u0441\u0442\u0430";
-          const prev = collected.get(uuid);
-          if (!prev) {
-            if (collected.size >= targetCount) return false;
-            collected.set(uuid, next);
-            return true;
-          }
-          const preferRating = prev.ratingText === "\u2014" && next.ratingText !== "\u2014";
-          const preferText = (prev.text || "").length < (next.text || "").length;
-          const preferDate = prev.date === "\u2014" && next.date !== "\u2014";
-          if (preferRating || preferText || preferDate) {
-            collected.set(uuid, { ...prev, ...next, order: prev.order });
-          }
-          return false;
-        };
-        const getOrderedReviewNodes = () => {
-          const seen = /* @__PURE__ */ new Set();
-          const nodes2 = [...document.querySelectorAll(reviewNodesSelector)].filter((n) => {
-            const id = getNodeId(n);
-            if (!id || seen.has(id)) return false;
-            seen.add(id);
-            return true;
-          }).sort((a, b) => {
-            const ay = window.scrollY + a.getBoundingClientRect().top;
-            const by = window.scrollY + b.getBoundingClientRect().top;
-            return ay - by;
-          });
-          return nodes2;
-        };
-        const collectNow = () => {
-          refreshReviewSection();
-          const before = collected.size;
-          const nodes2 = getOrderedReviewNodes();
-          for (const n of nodes2) {
-            upsertFromNode(n);
-            if (collected.size >= targetCount) break;
-          }
-          return { nodes: nodes2, added: collected.size - before };
-        };
-        const scrollStep = async (waitMs = 160) => {
-          refreshReviewSection();
-          const nodes2 = getOrderedReviewNodes();
-          const lastNode = nodes2.length ? nodes2[nodes2.length - 1] : null;
-          const anchor = lastNode || reviewSection;
-          if (anchor && typeof anchor.scrollIntoView === "function") {
-            anchor.scrollIntoView({ behavior: "auto", block: "end", inline: "nearest" });
-          }
-          await sleep(waitMs);
-        };
-        const waitForNewReviews = async (timeoutMs = noProgressTimeoutMs, pollMs = 250) => {
-          const startedCount = collected.size;
-          const startedAt = Date.now();
-          while (Date.now() - startedAt < timeoutMs) {
-            await sleep(pollMs);
-            const { added } = collectNow();
-            if (collected.size > startedCount || added > 0) return true;
-          }
-          return false;
-        };
-        collectNow();
-        let safetyLoops = 0;
-        let staleLoops = 0;
-        while (collected.size < targetCount && safetyLoops < 260) {
-          safetyLoops += 1;
-          const { added } = collectNow();
-          if (collected.size >= targetCount) break;
-          if (added > 0) {
-            staleLoops = 0;
-            await scrollStep(140);
-            continue;
-          }
-          const btn = moreBtn();
-          if (btn) {
-            btn.click();
-            const loadedAfterWait = await waitForNewReviews(noProgressTimeoutMs, 250);
-            if (loadedAfterWait) {
-              staleLoops = 0;
-              await scrollStep(140);
-              continue;
-            }
-            staleLoops += 1;
-            if (staleLoops >= 2) break;
-            await scrollStep(180);
-            continue;
-          }
-          await scrollStep(140);
-          const loadedAfterNudge = await waitForNewReviews(700, 250);
-          if (loadedAfterNudge) {
-            staleLoops = 0;
-            continue;
-          }
-          staleLoops += 1;
-          if (staleLoops >= 2) break;
-          continue;
-        }
-        collectNow();
-        const nodes = [...collected.values()].sort((a, b) => a.order - b.order).slice(0, targetCount);
-        const ratings = [];
-        const items = nodes.map((row, i) => {
-          const ratingNum = Number(String(row.ratingText).replace(",", "."));
-          if (Number.isFinite(ratingNum) && ratingNum > 0) ratings.push(ratingNum);
-          return `\u041E\u0442\u0437\u044B\u0432 ${i + 1} (${row.date}): ${row.ratingText}\u2605; ${row.text}`;
-        });
-        const avgFromReviews = ratings.length ? (ratings.reduce((s, x) => s + x, 0) / ratings.length).toFixed(2) : "";
-        const avg = avgFromInfo !== "\u2014" ? avgFromInfo : avgFromReviews || "\u2014";
-        const declaredShown = Math.max(Number(declared) || 0, items.length);
-        const header = `\u041E\u0442\u0437\u044B\u0432\u044B (\u0432\u044B\u0433\u0440\u0443\u0436\u0435\u043D\u043E ${items.length}${declaredShown ? ` \u0438\u0437 ${declaredShown}` : ""}, \u0441\u0440\u0435\u0434\u043D\u044F\u044F \u043E\u0446\u0435\u043D\u043A\u0430: ${avg})`;
-        return { header, items };
-      }
-      const buildOzonText = (info, rev = null) => {
-        const out = [
-          "=== CARD SUMMARY (OZON) ===",
-          `URL: ${info.url}`,
-          `\u0411\u0440\u0435\u043D\u0434: ${info.brand}`,
-          `\u041C\u0430\u0433\u0430\u0437\u0438\u043D: ${info.shop || "\u2014"}`,
-          `\u0417\u0430\u0433\u043E\u043B\u043E\u0432\u043E\u043A: ${info.title}`,
-          `\u041E\u0440\u0438\u0433\u0438\u043D\u0430\u043B: ${info.origMark}`,
-          `\u0426\u0435\u043D\u0430: ${info.price}`,
-          `\u0420\u0435\u0439\u0442\u0438\u043D\u0433: ${info.avgRating || "\u2014"} (${info.reviewsTotal || 0} \u043E\u0446\u0435\u043D\u043E\u043A)`
-        ];
-        if (info.unit) out.push(`\u0426\u0435\u043D\u0430 \u0437\u0430 \u0435\u0434\u0438\u043D\u0438\u0446\u0443: ${info.unit}`);
-        out.push(
+        const lines = [
+          "=== CARD SUMMARY (WILDBERRIES) ===",
+          `URL: ${url}`,
+          `\u0411\u0440\u0435\u043D\u0434: ${brand}`,
+          `\u041C\u0430\u0433\u0430\u0437\u0438\u043D: ${shop || "\u2014"}`,
+          `\u0417\u0430\u0433\u043E\u043B\u043E\u0432\u043E\u043A: ${title}`,
+          `\u041E\u0440\u0438\u0433\u0438\u043D\u0430\u043B: ${original}`,
+          `\u0426\u0435\u043D\u0430: ${price}`,
+          `\u0420\u0435\u0439\u0442\u0438\u043D\u0433: ${rating} (${reviewsTotal} \u043E\u0446\u0435\u043D\u043E\u043A)`,
           "",
           "=== \u041E\u041F\u0418\u0421\u0410\u041D\u0418\u0415 ===",
-          info.desc,
+          descr,
           "",
           "=== \u0425\u0410\u0420\u0410\u041A\u0422\u0415\u0420\u0418\u0421\u0422\u0418\u041A\u0418 ===",
-          ...toBullets(info.chars)
-        );
-        if (rev) {
-          out.push(
-            "",
-            "=== \u041E\u0422\u0417\u042B\u0412\u042B ===",
-            rev.header,
-            ...rev.items.map((i) => `- ${i}`)
-          );
+          ...toBullets(chars)
+        ];
+        const isFeedbacksPage = /\/catalog\/\d{4,}\/feedbacks/i.test(String(location.pathname || ""));
+        const hasFeedbackRoot = !!document.querySelector('.product-feedbacks__main, [class*="product-feedbacks__main"], #product-feedbacks');
+        if (includeReviews && (reviewsLink || isFeedbacksPage || hasFeedbackRoot)) {
+          if (reviewsLink && !isFeedbacksPage) {
+            try {
+              reviewsLink.click();
+            } catch (_) {
+            }
+          }
+          await wait('.product-feedbacks__main, [class*="product-feedbacks__main"], #product-feedbacks', 12e3);
+          await sleep(340);
+          if (switchToVariant) {
+            const switched = await switchWBReviewsToFirstSpecificVariant();
+            if (!switched) {
+              console.warn("[OWB] WB variant switch failed, continue with current reviews scope");
+            } else {
+              await sleep(180);
+            }
+          }
+          const expectedReviews = Math.max(1, Math.min(100, Number(reviewsTotal) || 100));
+          const revs = await loadWBReviews(expectedReviews);
+          const pickBables = (node) => {
+            const res = [];
+            node.querySelectorAll(".feedbacks-bables").forEach((b) => {
+              const title2 = b.querySelector(".feedbacks-bables__title")?.innerText.trim();
+              const vals = [...b.querySelectorAll(".feedbacks-bables__item")].map((li) => li.innerText.trim()).filter(Boolean);
+              if (title2 && vals.length) res.push(`${title2}: ${vals.join(", ")}`);
+            });
+            return res;
+          };
+          lines.push("", "=== \u041E\u0422\u0417\u042B\u0412\u042B ===", `\u041E\u0442\u0437\u044B\u0432\u044B (\u0432\u044B\u0433\u0440\u0443\u0436\u0435\u043D\u043E ${revs.length}):`);
+          if (revs.length) {
+            revs.forEach((el, idx) => {
+              const date = el.querySelector(".feedback__date")?.innerText.trim() || "\u2014";
+              const star = el.querySelector(".feedback__rating");
+              const cls = star && [...star.classList].find((c) => /^star\d+$/.test(c));
+              const rate = cls ? cls.replace("star", "") + "\u2605" : "\u2014";
+              const purchased = el.querySelector(".feedback__state--text")?.innerText.trim() || "\u2014";
+              const parts = [`${rate}, ${purchased}`];
+              const pros = el.querySelector(".feedback__text--item-pro")?.innerText.replace(/^Достоинства:/, "").trim();
+              if (pros) parts.push(`\u0414\u043E\u0441\u0442\u043E\u0438\u043D\u0441\u0442\u0432\u0430: ${pros}`);
+              const cons = el.querySelector(".feedback__text--item-con")?.innerText.replace(/^Недостатки:/, "").trim();
+              if (cons) parts.push(`\u041D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043A\u0438: ${cons}`);
+              const free = [...el.querySelectorAll(".feedback__text--item")].find((n) => !n.classList.contains("feedback__text--item-pro") && !n.classList.contains("feedback__text--item-con"))?.innerText.replace(/^Комментарий:/, "").trim();
+              if (free) parts.push(`\u041A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439: ${free}`);
+              pickBables(el).forEach((t) => parts.push(t));
+              lines.push(`- \u041E\u0442\u0437\u044B\u0432 ${idx + 1} (${date}): ${parts.join("; ")}`);
+            });
+          } else lines.push("\u041D\u0435\u0442 \u043E\u0442\u0437\u044B\u0432\u043E\u0432");
         }
-        return out.join("\n");
-      };
-      const getOzonPidKey = () => {
-        const path = String(location.pathname || "");
-        const m = path.match(/\/product\/[^/]*?(\d{5,})(?:\/|$)/) || path.match(/\/product\/(\d{5,})(?:\/|$)/);
-        return m && m[1] ? `ozon:${m[1]}` : "";
-      };
-      const buildOzonExportPackage = async (opts = {}) => {
-        const includeReviews = opts.includeReviews !== false;
-        const switchToVariant = opts.switchToVariant === true;
-        const info = await collectInfo();
-        const maxReviews = 100;
-        const rev = includeReviews ? await loadReviews(maxReviews, { switchToVariant, avgRating: info.avgRating, reviewsTotal: info.reviewsTotal }) : null;
-        const txt = buildOzonText(info, rev);
-        const filenameBase = info.brand && info.brand !== "\u2014" ? `${info.title} ${info.brand}` : info.title;
-        const name = `${slug(filenameBase)}.txt`;
+        const txt = lines.join("\n");
+        const filenameBase = brand && brand !== "\u2014" ? `${title} ${brand}` : title;
+        const fname = slug(filenameBase) + ".txt";
         return {
-          market: "ozon",
-          pidKey: getOzonPidKey(),
-          url: info.url,
-          title: info.title,
-          filename: name,
+          market: "wb",
+          pidKey: getWBPidKey(),
+          url,
+          title,
+          filename: fname,
           text: txt
         };
-      };
-      async function exportOzon(opts = {}) {
+      }
+      async function exportWB(opts = {}) {
         try {
           const copyOnly = !!opts.copyOnly;
-          const pack = await buildOzonExportPackage(opts);
+          const pack = await buildWBExportPackage(opts);
           if (copyOnly) {
             await copyToClipboard(pack.text);
             await saveLastExtractSessionFromItem(pack, {
@@ -1487,7 +952,7 @@ ${shown.join("\n")}`;
               allReviews: opts.includeReviews !== false
             });
             try {
-              await showExportMarkMaybe({ mode: "copy", scope: "single", market: "ozon" });
+              await showExportMarkMaybe({ mode: "copy", scope: "single", market: "wb" });
             } catch (_) {
             }
             let shouldRestore2 = true;
@@ -1497,7 +962,7 @@ ${shown.join("\n")}`;
               shouldRestore2 = true;
             }
             if (shouldRestore2) {
-              await restoreCardFocus({ mode: "copy", scope: "single", market: "ozon" });
+              await restoreCardFocus({ mode: "copy", scope: "single", market: "wb" });
             }
             return;
           }
@@ -1507,7 +972,7 @@ ${shown.join("\n")}`;
             allReviews: opts.includeReviews !== false
           });
           try {
-            await showExportMarkMaybe({ mode: "download", scope: "single", market: "ozon" });
+            await showExportMarkMaybe({ mode: "download", scope: "single", market: "wb" });
           } catch (_) {
           }
           let shouldRestore = true;
@@ -1517,32 +982,34 @@ ${shown.join("\n")}`;
             shouldRestore = true;
           }
           if (shouldRestore) {
-            await restoreCardFocus({ mode: "download", scope: "single", market: "ozon" });
+            await restoreCardFocus({ mode: "download", scope: "single", market: "wb" });
           }
         } catch (err) {
-          console.error("Ozon exporter:", err);
+          console.error("WB exporter:", err);
+          throw err;
         }
       }
       setRunExport(async (opts = {}) => {
-        return buildOzonExportPackage({
+        const allReviews = opts.allReviews === true;
+        return buildWBExportPackage({
           includeReviews: opts.includeReviews !== false,
-          switchToVariant: false,
-          maxReviews: 100
+          switchToVariant: allReviews ? false : true
         });
       });
+      const wbTitleSelector = '[class^="productTitle"], [class*=" productTitle"], .product-page__title';
       setInterval(() => {
-        attachActionButtons(document.querySelector('[data-widget="webProductHeading"] h1'), "ozon", [
-          { label: "\u0421\u043A\u0430\u0447\u0430\u0442\u044C", kind: "full", run: () => exportOzon({ includeReviews: true, switchToVariant: true, maxReviews: 100 }) },
-          { label: "\u0432\u0441\u0435 \u043E\u0442\u0437\u044B\u0432\u044B", kind: "all", run: () => exportOzon({ includeReviews: true, switchToVariant: false, maxReviews: 100 }) },
-          { label: "\u0432 \u0431\u0443\u0444\u0435\u0440", kind: "copy", pendingText: "\u041A\u043E\u043F\u0438\u0440\u0443\u044E...", successText: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E", toastSuccess: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E \u0432 \u0431\u0443\u0444\u0435\u0440", run: () => exportOzon({ includeReviews: false, copyOnly: true }) },
-          { label: "\u0432 \u0431\u0443\u0444\u0435\u0440 \u0441 \u043E\u0442\u0437\u044B\u0432\u0430\u043C\u0438", kind: "copy_all", pendingText: "\u041A\u043E\u043F\u0438\u0440\u0443\u044E...", successText: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E", toastSuccess: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E \u0432 \u0431\u0443\u0444\u0435\u0440", run: () => exportOzon({ includeReviews: true, switchToVariant: true, copyOnly: true, maxReviews: 100 }) }
+        attachActionButtons(document.querySelector(wbTitleSelector), "wb", [
+          { label: "\u0421\u043A\u0430\u0447\u0430\u0442\u044C", kind: "full", run: () => exportWB({ includeReviews: true, switchToVariant: true }) },
+          { label: "\u0432\u0441\u0435 \u043E\u0442\u0437\u044B\u0432\u044B", kind: "all", run: () => exportWB({ includeReviews: true, switchToVariant: false }) },
+          { label: "\u0432 \u0431\u0443\u0444\u0435\u0440", kind: "copy", pendingText: "\u041A\u043E\u043F\u0438\u0440\u0443\u044E...", successText: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E", toastSuccess: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E \u0432 \u0431\u0443\u0444\u0435\u0440", run: () => exportWB({ includeReviews: false, copyOnly: true }) },
+          { label: "\u0432 \u0431\u0443\u0444\u0435\u0440 \u0441 \u043E\u0442\u0437\u044B\u0432\u0430\u043C\u0438", kind: "copy_all", pendingText: "\u041A\u043E\u043F\u0438\u0440\u0443\u044E...", successText: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E", toastSuccess: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E \u0432 \u0431\u0443\u0444\u0435\u0440", run: () => exportWB({ includeReviews: true, switchToVariant: true, copyOnly: true }) }
         ]);
       }, 1e3);
     }
-    initOzon();
+    initWB();
   })();
 
-  // content/price-monitor/common.js
+  // src/content/price-monitor/common.js
   (function() {
     "use strict";
     const MP = window.MP;
@@ -2134,7 +1601,7 @@ ${shown.join("\n")}`;
     };
   })();
 
-  // content/price-monitor/ozon.js
+  // src/content/price-monitor/wb.js
   (() => {
     "use strict";
     const PM = window.OWBPriceMonitor;
@@ -2143,135 +1610,105 @@ ${shown.join("\n")}`;
       startProductTracker,
       startCardScanner,
       collectGroupsFromCards,
-      isBadgeCardCandidate,
       setCurrentProductDetector,
       parsePriceValue,
       detectCurrency,
       extractDigits,
       findArticleByLabel,
+      findBlockAnchor,
       findPriceInCard
     } = PM;
-    const pickVisible = (nodes) => (nodes || []).find((el) => el && el.isConnected && el.getClientRects && el.getClientRects().length) || nodes && nodes[0] || null;
-    const getPriceWidget = () => pickVisible([...document.querySelectorAll('[data-widget="webPrice"]')]);
-    const getSaleWidget = () => pickVisible([...document.querySelectorAll('[data-widget="webSale"]')]);
+    const getPriceNode = () => document.querySelector('[class^="priceBlockWalletPrice"], [class*=" priceBlockWalletPrice"]') || document.querySelector('ins[class^="priceBlockFinalPrice"], ins[class*=" priceBlockFinalPrice"]') || document.querySelector('span[class^="priceBlockPrice"], span[class*=" priceBlockPrice"], [class*="priceBlock"] [class*="price"], [class*="orderBlock"] [class*="price"]');
     const getPagePrice = () => {
-      const priceWidget = getPriceWidget();
-      if (priceWidget) {
-        const headline = priceWidget.querySelector('span[class*="tsHeadline"], .tsHeadline600Large, .tsHeadline500Medium');
-        const headlineText = headline?.textContent || "";
-        if (headlineText) {
-          const headlinePrice = parsePriceValue(headlineText);
-          if (Number.isFinite(headlinePrice)) return { price: headlinePrice, currency: detectCurrency(headlineText) || "\u20BD", text: headlineText };
-        }
-        const text = priceWidget.querySelector("span")?.textContent || priceWidget.textContent || "";
-        const info2 = findPriceInCard(priceWidget, { defaultCurrency: "\u20BD" });
-        if (info2 && Number.isFinite(Number(info2.price))) return { price: Number(info2.price), currency: info2.currency || "\u20BD", text };
-        const parsed = parsePriceValue(text);
-        if (Number.isFinite(parsed)) return { price: parsed, currency: detectCurrency(text) || "\u20BD", text };
-      }
-      const saleWidget = getSaleWidget();
-      if (!saleWidget) return null;
-      const info = findPriceInCard(saleWidget, { defaultCurrency: "\u20BD" });
-      if (info && Number.isFinite(Number(info.price))) return { price: Number(info.price), currency: info.currency || "\u20BD", text: saleWidget.textContent || "" };
-      return null;
+      const node = getPriceNode();
+      if (!node) return null;
+      const text = node.textContent || "";
+      const info = findPriceInCard(node.closest("section,article,div") || node.parentElement || node, { defaultCurrency: "\u20BD" });
+      if (info && Number.isFinite(Number(info.price))) return { price: Number(info.price), currency: info.currency || "\u20BD", text };
+      const parsed = parsePriceValue(text);
+      return Number.isFinite(parsed) ? { price: parsed, currency: detectCurrency(text) || "\u20BD", text } : null;
     };
-    function initOzon() {
+    function initWB() {
+      const parseBasketPriceText = (text) => {
+        const raw = String(text || "").replace(/[\u00A0\u202F]/g, " ").replace(/\s+/g, " ").trim();
+        if (!raw) return null;
+        const lowered = raw.toLowerCase();
+        if (/(?:\/|за)\s*\d*[.,]?\d*\s*(шт|шту|уп|упак|пак|г|гр|кг|мл|л)\b/.test(lowered)) return null;
+        if (/(шт|шту|уп|упак|пак|г|гр|кг|мл|л)\b/.test(lowered) && /(?:\/|за|x|×)/.test(lowered)) return null;
+        const numberGroups = raw.match(/\d[\d\s.,]*/g) || [];
+        if (numberGroups.length > 1) return null;
+        const price = parsePriceValue(raw);
+        return Number.isFinite(price) ? { price, currency: detectCurrency(raw) || "\u20BD", text: raw } : null;
+      };
       const getPid = () => {
-        const path = location.pathname;
-        const fromUrl = path.match(/\/product\/[^/]*?(\d{5,})(?:\/|$)/) || path.match(/\/product\/(\d{5,})(?:\/|$)/);
+        const fromUrl = location.pathname.match(/\/catalog\/(\d{4,})\/detail/i);
         if (fromUrl) return fromUrl[1];
-        const sku = extractDigits(document.querySelector('[data-widget="webDetailSKU"]')?.textContent || "");
-        if (sku) return sku;
-        return findArticleByLabel(document.querySelector("#section-characteristics")) || findArticleByLabel(document.body);
+        const nmId = document.querySelector("[data-nm-id]")?.getAttribute("data-nm-id");
+        if (nmId) return nmId;
+        const sku = document.querySelector('meta[itemprop="sku"], meta[name="item_id"]')?.getAttribute("content") || "";
+        const digits = extractDigits(sku);
+        if (digits) return digits;
+        return findArticleByLabel(document.body);
       };
-      const getAnchor = () => getPriceWidget() || getSaleWidget();
-      const isProductPage = () => /\/product\/[^/]*?\d{5,}(?:\/|$)/.test(location.pathname || "");
-      startProductTracker({ market: "ozon", getPid, getPrice: getPagePrice, getAnchor, isProductPage });
-      const extractIdFromOzonMedia = (value) => {
-        const text = String(value || "");
-        if (!text) return "";
-        const parts = text.split(",");
-        for (const rawPart of parts) {
-          const part = rawPart.trim();
-          if (!part) continue;
-          const urlPart = part.split(/\s+/)[0] || "";
-          const match = urlPart.match(/\/(\d{7,})(?:\.(?:jpe?g|webp|png)|\/|\?|$)/i);
-          if (match) return match[1];
+      const getAnchor = () => {
+        const node = getPriceNode();
+        if (!node) return null;
+        let candidate = null;
+        let cur = node;
+        while (cur && cur !== document.body) {
+          if (cur.tagName === "DIV" || cur.tagName === "SECTION" || cur.tagName === "ARTICLE") {
+            const cls = String(cur.className || "");
+            if (/priceBlock/i.test(cls)) {
+              if (!/priceBlockPrice/i.test(cls)) candidate = cur;
+              else if (!candidate) candidate = cur;
+            } else if (/productPrice/i.test(cls)) {
+              candidate = cur;
+            }
+          }
+          cur = cur.parentElement;
         }
-        return "";
+        return candidate || findBlockAnchor(node, /priceBlock|productPrice|productSummary|priceBlockContent|orderBlock|buybox|basket/i) || node.parentElement || node;
       };
-      const isDirectCartChild = (card) => {
-        const root = card?.closest?.('[data-widget="cartSplit"]');
-        return !!(root && card.parentElement === root);
-      };
-      const isOzonCartCard = (card) => {
-        if (!card || !isDirectCartChild(card)) return false;
-        if (!card.querySelector("img")) return false;
-        const hasTitle = !!card.querySelector(
-          'a[href*="/product/"], [class*="checkout_p2"], [class*="tsCompact500"], [class*="tsCompact400"]'
-        );
-        if (!hasTitle) return false;
-        const text = String(card.textContent || "").replace(/\s+/g, " ").trim();
-        const hasCartSignals = /купить|похожие|закончился|количество ограничено|осталось\s+\d+/i.test(text);
-        const priceInfo = findPriceInCard(card, { defaultCurrency: "\u20BD" });
-        return !!(hasCartSignals || priceInfo && Number.isFinite(Number(priceInfo.price)));
-      };
+      const isProductPage = () => /\/catalog\/\d{4,}\/detail/i.test(location.pathname || "");
+      startProductTracker({ market: "wb", getPid, getPrice: getPagePrice, getAnchor, isProductPage });
       const getCardPid = (card) => {
         if (!card) return "";
-        const fav = card.querySelector('[favlistslink*="sku="]')?.getAttribute("favlistslink") || card.getAttribute("favlistslink") || "";
-        const favMatch = fav.match(/sku=(\d{5,})/);
-        if (favMatch) return favMatch[1];
-        const dataSku = card.querySelector("[data-sku]")?.getAttribute("data-sku") || card.getAttribute("data-sku") || "";
-        const digits = extractDigits(dataSku);
-        if (digits) return digits;
-        const href = card.querySelector('a[href*="/product/"]')?.getAttribute("href") || "";
-        const m = href.match(/\/product\/[^/]*?(\d{5,})(?:\/|\?|$)/) || href.match(/-(\d{5,})(?:\/|\?|$)/);
-        if (m) return m[1];
-        if (isOzonCartCard(card)) return "";
-        const image = card.querySelector("img");
-        const fromImg = extractIdFromOzonMedia(image?.getAttribute("src")) || extractIdFromOzonMedia(image?.getAttribute("srcset")) || extractIdFromOzonMedia(image?.currentSrc);
-        if (fromImg) return fromImg;
-        return "";
+        const direct = card.getAttribute("data-nm-id") || card.getAttribute("data-popup-nm-id") || card.dataset.nmId || card.dataset.popupNmId;
+        if (direct) return direct;
+        const href = card.querySelector('a[href*="/catalog/"]')?.getAttribute("href") || "";
+        const m = href.match(/\/catalog\/(\d{4,})\/detail/i);
+        return m ? m[1] : "";
       };
       const getCardPrice = (card) => {
         if (!card) return null;
-        if (isOzonCartCard(card)) {
-          for (const block of [...card.children]) {
-            if (!block || !block.querySelector) continue;
-            const info2 = findPriceInCard(block, { defaultCurrency: "\u20BD" });
-            if (info2 && Number.isFinite(Number(info2.price))) {
-              return {
-                price: Number(info2.price),
-                currency: info2.currency || "\u20BD",
-                text: block.textContent || card.textContent || ""
-              };
-            }
-          }
+        const favoritesNowNode = card.querySelector('ins[class*="goodsCardPriceNow"], ins[class*="walletPrice"], p[class*="goodsCardPrice"] ins');
+        const favoritesInfo = parseBasketPriceText(favoritesNowNode?.textContent || "");
+        if (favoritesInfo) return favoritesInfo;
+        const primaryNode = card.querySelector('.list-item__price > div, [class*="list-item__price"] [class*="red-price"]');
+        const walletNode = card.querySelector('.list-item__price-wallet, [class*="list-item__price-wallet"], [class*="price-wallet"]');
+        const primaryInfo = parseBasketPriceText(primaryNode?.textContent || "");
+        const walletInfo = parseBasketPriceText(walletNode?.textContent || "");
+        if (primaryInfo && walletInfo) {
+          const low = Math.min(primaryInfo.price, walletInfo.price);
+          const high = Math.max(primaryInfo.price, walletInfo.price);
+          if (low > 0 && high / low >= 2.5) return primaryInfo.price >= walletInfo.price ? primaryInfo : walletInfo;
+          return primaryInfo.price <= walletInfo.price ? primaryInfo : walletInfo;
         }
-        const headlineNodes = [...card.querySelectorAll('span[class*="tsHeadline"], div[class*="tsHeadline"]')];
-        let headlineBest = null;
-        for (const node of headlineNodes) {
-          const text = String(node.textContent || "").replace(/\s+/g, " ").trim();
-          if (!text || !/\d/.test(text) || /%/.test(text)) continue;
-          if (/отзыв|шт\b|остал|рейтинг|балл/i.test(text)) continue;
-          if (!/[₽€$֏₸]/.test(text) && !/(^|\D)\d{2,}(\D|$)/.test(text)) continue;
-          const price = parsePriceValue(text);
-          if (!Number.isFinite(price)) continue;
-          const currency = detectCurrency(text) || detectCurrency(card.textContent || "") || "\u20BD";
-          const cand = { price, currency, text };
-          if (!headlineBest || cand.price < headlineBest.price) headlineBest = cand;
-        }
-        if (headlineBest) return headlineBest;
+        if (primaryInfo) return primaryInfo;
+        if (walletInfo) return walletInfo;
         const info = findPriceInCard(card, { defaultCurrency: "\u20BD" });
         return info && Number.isFinite(Number(info.price)) ? { price: Number(info.price), currency: info.currency || "\u20BD", text: card.textContent || "" } : null;
       };
+      const isWbCartCard = (card) => !!(card && (card.matches(".j-b-basket-item, .accordion__list-item.list-item") || card.closest(".basket-list, .accordion__list")) && card.querySelector("img, picture"));
       const getCartBadgeTarget = (card) => {
-        const image = card?.querySelector("picture img, img");
-        let imageBlock = image?.parentElement;
-        if (imageBlock?.tagName === "PICTURE") imageBlock = imageBlock.parentElement;
-        if (!imageBlock || !card.contains(imageBlock)) {
-          imageBlock = image?.closest("div") || image || card;
+        const image = card.querySelector("picture img, img");
+        let imageBlock = image?.closest(".list-item__photo") || image?.closest('[class*="photo"]') || image?.closest('[class*="img"]') || image?.parentElement || card;
+        while (imageBlock && imageBlock !== card) {
+          const text = String(imageBlock.textContent || "").replace(/\s+/g, " ").trim();
+          if (imageBlock.querySelector("img, picture") && text.length <= 40) break;
+          imageBlock = imageBlock.parentElement;
         }
+        imageBlock = imageBlock && imageBlock !== card ? imageBlock : image?.parentElement || card;
         imageBlock.classList.remove("mp-min-price-anchor--below-center");
         imageBlock.classList.remove("mp-min-price-anchor--below");
         imageBlock.classList.remove("mp-min-price-anchor--photo");
@@ -2280,41 +1717,40 @@ ${shown.join("\n")}`;
       };
       startCardScanner({
         collectGroups: () => collectGroupsFromCards({
-          market: "ozon",
+          market: "wb",
           cardSelector: [
-            'div[class*="tile-root"]',
-            '[data-widget="skuGrid"] [data-index]',
-            'article[class*="tile"]',
-            'div[data-sku][class*="tile"]',
-            '[data-widget="cartSplit"] > div',
-            '[data-widget="cartSplit"] > section',
-            '[data-widget="cartSplit"] > article'
+            "article.product-card",
+            "article[data-nm-id]",
+            "article[data-popup-nm-id]",
+            "div.product-card[data-nm-id]",
+            "div.product-card[data-popup-nm-id]",
+            ".basket-list .j-b-basket-item",
+            ".basket-list .accordion__list-item.list-item",
+            ".accordion__list .j-b-basket-item",
+            'li[class*="goodsCardFavorites"]',
+            'li[id^="fav"][class*="goodsCard"]'
           ].join(", "),
           getPid: getCardPid,
           getPrice: getCardPrice,
-          isCardCandidate: (card) => isOzonCartCard(card) || isBadgeCardCandidate(card, "ozon"),
           defaultCurrency: "\u20BD"
         }),
-        getBadgeTarget: (card) => {
-          if (isOzonCartCard(card)) return getCartBadgeTarget(card);
-          return card.querySelector('.checkout_s0, [class*="checkout_s0"]') || card.querySelector('.checkout_r5, [class*="checkout_r5"]') || card;
-        }
+        getBadgeTarget: (card) => isWbCartCard(card) ? getCartBadgeTarget(card) : card.querySelector(".list-item__good") || card.querySelector(".list-item__good-info") || card.querySelector('[class*="imgWrap"]') || card.querySelector('a[href*="/catalog/"][href*="/detail"]') || card
       });
     }
     const detectCurrentProduct = () => {
       const path = String(location.pathname || "");
-      const fromUrl = path.match(/\/product\/[^/]*?(\d{5,})(?:\/|$)/) || path.match(/\/product\/(\d{5,})(?:\/|$)/);
-      const pid = fromUrl && fromUrl[1] || extractDigits(document.querySelector('[data-widget="webDetailSKU"]')?.textContent || "") || findArticleByLabel(document.querySelector("#section-characteristics")) || "";
+      const fromUrl = path.match(/\/catalog\/(\d{4,})\/detail/i) || path.match(/\/catalog\/(\d{4,})\/feedbacks/i);
+      const pid = fromUrl && fromUrl[1] || document.querySelector("[data-nm-id]")?.getAttribute("data-nm-id") || extractDigits(document.querySelector('meta[itemprop="sku"], meta[name="item_id"]')?.getAttribute("content") || "") || "";
       if (!pid) return null;
       const priceInfo = getPagePrice();
       return {
-        market: "ozon",
+        market: "wb",
         pid,
-        pidKey: `ozon:${pid}`,
+        pidKey: `wb:${pid}`,
         currency: priceInfo?.currency || ""
       };
     };
     setCurrentProductDetector(detectCurrentProduct);
-    initOzon();
+    initWB();
   })();
 })();

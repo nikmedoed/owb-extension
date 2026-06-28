@@ -2,7 +2,7 @@
 
 Chrome-расширение для Ozon/WB/AliExpress на базе ваших Tampermonkey-скриптов.
 
-Эта папка должна быть самодостаточной для `Load unpacked`. Content bundles пересобираются из этой папки:
+Эта папка должна быть самодостаточной для `Load unpacked`. Generated artifacts пересобираются из этой папки:
 
 ```powershell
 npm install
@@ -11,30 +11,14 @@ npm run build:local
 
 После скачивания репозитория можно сразу использовать `Load unpacked` -> `extension`. Пересборка нужна только после изменения исходников.
 
-## Что внутри
+## Структура
 
-- `content/exporter/common.js` - общий runtime bridge + UI кнопок экспорта
-- `content/exporter/ozon.js` - экспорт карточки Ozon (инфо/характеристики/отзывы)
-- `content/exporter/wb.js` - экспорт карточки Wildberries
-- `content/exporter/aliexpress.js` - экспорт карточки AliExpress с переходом на страницу отзывов
-- `content/exporter/amazon.js` - экспорт карточки Amazon
-- `content/price-monitor/common.js` - общий монитор цены, график, бейджи минимума, bridge
-- `content/price-monitor/ozon.js` - селекторы/парсинг/детектор товара для Ozon
-- `content/price-monitor/wb.js` - селекторы/парсинг/детектор товара для Wildberries
-- `content/price-monitor/aliexpress.js` - селекторы/парсинг/детектор товара для AliExpress
-- `content/price-monitor/amazon.js` - селекторы/парсинг/детектор товара для Amazon
-- `content/mp-core.js` - общий core с адаптацией `GM_*` в bridge расширения
-- `background/service-worker.js` - storage API, IndexedDB истории цен, экспорт/импорт, сетевые JSON-запросы, двунаправленный sync с сервером
-- `popup/` - быстрый статус и настройки
-- `options/` - дефолты + экспорт/импорт всей БД расширения
+- `src/` - JS-исходники, которые собираются через `esbuild`.
+- `build/` - готовые load-unpacked файлы, которые подключает `manifest.json`.
+- `scripts/` - local/dev/release сборка.
+- `manifest.json` - Manifest V3 с путями на файлы из `build/`.
 
-`manifest.json` разделяет content scripts по площадкам и подключает по одному bundled entrypoint на маркетплейс: `content/ozon.js`, `content/wb.js`, `content/aliexpress.js`, `content/amazon.js`.
-
-## Источники, откуда перенесено
-
-- `C:\clouds\Dropbox\programming\myTampermonkeyScripts\OZON-WB-tools`
-- `C:\clouds\Dropbox\programming\myTampermonkeyScripts\Product-card-extract-OZON-WB.user.js`
-- `C:\clouds\Dropbox\programming\myTampermonkeyScripts\icons\ozon-wb-download.png`
+`build/content/*.js`, `build/background/service-worker.js`, `build/popup/*.js`, `build/options/*.js` и `build/history/*.js` пересобираются из `src/**`. Статические `html/css/icons` лежат только в `build/**`.
 
 ## Хранилище и синхронизация истории цен
 

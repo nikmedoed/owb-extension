@@ -4,4 +4,4 @@ set -eu
 echo "Building extension artifacts..."
 npm --prefix extension run build:local
 
-git add extension/content/ozon.js extension/content/wb.js extension/content/aliexpress.js
+git add extension/build

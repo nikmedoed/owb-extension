@@ -192,14 +192,28 @@
         if (!text) return null;
         const normalizedText = String(text).replace(/[\u00A0\u202F]/g, ' ').replace(/\s+/g, ' ').trim();
         if (!normalizedText) return null;
-        const byCurrency = normalizedText.match(/(\d[\d\s.,]*?)\s*[₽€$£¥֏₸₺₴₹₩]/);
-        const rawNumber = (byCurrency && byCurrency[1]) || (normalizedText.match(/(\d[\d\s.,]*)/) || [])[1] || '';
+        const escapedCurrencyChars = '₽€\\$£¥֏₸₺₴₹₩';
+        const numberPattern = '\\d[\\d\\s.,]*';
+        const afterCurrency = normalizedText.match(new RegExp(`[${escapedCurrencyChars}]\\s*(${numberPattern})`));
+        const beforeCurrency = normalizedText.match(new RegExp(`(${numberPattern})\\s*[${escapedCurrencyChars}]`));
+        const rawNumber = (afterCurrency && afterCurrency[1]) || (beforeCurrency && beforeCurrency[1]) || (normalizedText.match(/(\d[\d\s.,]*)/) || [])[1] || '';
         if (!rawNumber) return null;
-        const compact = rawNumber
-            .replace(/\s+/g, '')
-            .replace(/,(?=\d{3}\b)/g, '')
-            .replace(/\.(?=\d{3}\b)/g, '');
-        const prepared = compact.replace(',', '.');
+        const compact = rawNumber.replace(/\s+/g, '');
+        const comma = compact.lastIndexOf(',');
+        const dot = compact.lastIndexOf('.');
+        let prepared = compact;
+        if (comma >= 0 && dot >= 0) {
+            const decimalSep = comma > dot ? ',' : '.';
+            const thousandsSep = decimalSep === ',' ? '.' : ',';
+            prepared = compact.split(thousandsSep).join('').replace(decimalSep, '.');
+        } else if (comma >= 0 || dot >= 0) {
+            const sep = comma >= 0 ? ',' : '.';
+            const parts = compact.split(sep);
+            const last = parts[parts.length - 1] || '';
+            prepared = parts.length > 2 || last.length === 3
+                ? parts.join('')
+                : compact.replace(sep, '.');
+        }
         const direct = /^\d+(?:\.\d+)?$/.test(prepared) ? prepared : ((prepared.match(/\d+(?:\.\d+)?/) || [])[0] || '');
         if (!direct) return null;
         const value = Number(direct);

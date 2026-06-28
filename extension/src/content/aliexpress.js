@@ -1,5 +1,5 @@
-import "../../content/mp-core.js";
-import "../../content/exporter/common.js";
-import "../../content/exporter/aliexpress.js";
-import "../../content/price-monitor/common.js";
-import "../../content/price-monitor/aliexpress.js";
+import "./mp-core.js";
+import "./exporter/common.js";
+import "./exporter/aliexpress.js";
+import "./price-monitor/common.js";
+import "./price-monitor/aliexpress.js";

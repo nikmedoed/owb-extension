@@ -43,7 +43,6 @@ owb-tools-release.zip
 *.map
 extension/node_modules/
 extension/dist/
-extension/build/
 extension/.parcel-cache/
 extension/.cache/
 extension/web-ext-artifacts/
