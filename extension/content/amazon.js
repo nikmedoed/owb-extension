@@ -1163,10 +1163,10 @@
       setInterval(() => {
         if (!isProductPage()) return;
         attachActionButtons(getTitleNode(), "amazon", [
-          { label: "\u0421\u043A\u0430\u0447\u0430\u0442\u044C", kind: "full", run: () => exportAmazon({ copyOnly: false }) },
-          { label: "\u0432 \u0431\u0443\u0444\u0435\u0440", kind: "copy", pendingText: "\u041A\u043E\u043F\u0438\u0440\u0443\u044E...", successText: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E", toastSuccess: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E \u0432 \u0431\u0443\u0444\u0435\u0440", run: () => exportAmazon({ copyOnly: true }) },
-          { label: "\u0432\u0441\u0435 \u043E\u0442\u0437\u044B\u0432\u044B", kind: "full", run: () => exportAmazon({ copyOnly: false, includeReviews: true, allReviews: true }) },
-          { label: "\u043E\u0442\u0437\u044B\u0432\u044B \u0432 \u0431\u0443\u0444\u0435\u0440", kind: "copy", pendingText: "\u041A\u043E\u043F\u0438\u0440\u0443\u044E...", successText: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E", toastSuccess: "\u041E\u0442\u0437\u044B\u0432\u044B \u0441\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u044B", run: () => exportAmazon({ copyOnly: true, includeReviews: true, allReviews: true }) }
+          { label: "\u0421\u043A\u0430\u0447\u0430\u0442\u044C", kind: "full", run: () => exportAmazon({ copyOnly: false, includeReviews: true }) },
+          { label: "\u0432\u0441\u0435 \u043E\u0442\u0437\u044B\u0432\u044B", kind: "all", run: () => exportAmazon({ copyOnly: false, includeReviews: true, allReviews: true }) },
+          { label: "\u0432 \u0431\u0443\u0444\u0435\u0440", kind: "copy", pendingText: "\u041A\u043E\u043F\u0438\u0440\u0443\u044E...", successText: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E", toastSuccess: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E \u0432 \u0431\u0443\u0444\u0435\u0440", run: () => exportAmazon({ copyOnly: true, includeReviews: false }) },
+          { label: "\u0432 \u0431\u0443\u0444\u0435\u0440 \u0441 \u043E\u0442\u0437\u044B\u0432\u0430\u043C\u0438", kind: "copy_all", pendingText: "\u041A\u043E\u043F\u0438\u0440\u0443\u044E...", successText: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E", toastSuccess: "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E \u0432 \u0431\u0443\u0444\u0435\u0440", run: () => exportAmazon({ copyOnly: true, includeReviews: true }) }
         ]);
       }, 1e3);
     }

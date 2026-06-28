@@ -563,10 +563,10 @@
         setInterval(() => {
             if (!isProductPage()) return;
             attachActionButtons(getTitleNode(), 'amazon', [
-                { label: 'Скачать', kind: 'full', run: () => exportAmazon({ copyOnly: false }) },
-                { label: 'в буфер', kind: 'copy', pendingText: 'Копирую...', successText: 'Скопировано', toastSuccess: 'Скопировано в буфер', run: () => exportAmazon({ copyOnly: true }) },
-                { label: 'все отзывы', kind: 'full', run: () => exportAmazon({ copyOnly: false, includeReviews: true, allReviews: true }) },
-                { label: 'отзывы в буфер', kind: 'copy', pendingText: 'Копирую...', successText: 'Скопировано', toastSuccess: 'Отзывы скопированы', run: () => exportAmazon({ copyOnly: true, includeReviews: true, allReviews: true }) },
+                { label: 'Скачать', kind: 'full', run: () => exportAmazon({ copyOnly: false, includeReviews: true }) },
+                { label: 'все отзывы', kind: 'all', run: () => exportAmazon({ copyOnly: false, includeReviews: true, allReviews: true }) },
+                { label: 'в буфер', kind: 'copy', pendingText: 'Копирую...', successText: 'Скопировано', toastSuccess: 'Скопировано в буфер', run: () => exportAmazon({ copyOnly: true, includeReviews: false }) },
+                { label: 'в буфер с отзывами', kind: 'copy_all', pendingText: 'Копирую...', successText: 'Скопировано', toastSuccess: 'Скопировано в буфер', run: () => exportAmazon({ copyOnly: true, includeReviews: true }) },
             ]);
         }, 1000);
     }
