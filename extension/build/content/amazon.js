@@ -749,6 +749,94 @@
       if (!Number.isFinite(price)) return null;
       return { price, currency: normalizeCurrency(detectCurrency(text) || "$"), text };
     };
+    const getAmazonCurrency = () => {
+      const explicit = document.querySelector('input#priceSymbol, input[name="priceSymbol"]')?.value || document.querySelector("input#currencyOfPreference")?.value || "";
+      const fromState = [...document.querySelectorAll('script[type="a-state"]')].map((node) => node.textContent || "").find((text) => /"currencyOfPreference"\s*:/.test(text));
+      return normalizeCurrency(detectCurrency(explicit) || explicit || fromState && (fromState.match(/"currencyOfPreference"\s*:\s*"([^"]+)"/) || [])[1] || "USD") || "$";
+    };
+    const parseFromPriceText = (text) => {
+      const cleaned = clean(text);
+      if (!/\b(from|starting\s+at|starts\s+at|options?\s+from)\b/i.test(cleaned)) return null;
+      const price = parsePriceValue(cleaned);
+      if (!Number.isFinite(price)) return null;
+      return { price, currency: normalizeCurrency(detectCurrency(cleaned) || getAmazonCurrency()), text: cleaned };
+    };
+    const parseDeliveryCostFromText = (text) => {
+      const cleaned = clean(text);
+      if (!/\b(ship(?:ping)?|delivery)\b/i.test(cleaned)) return null;
+      if (/\bfree\b.{0,30}\b(ship(?:ping)?|delivery)\b/i.test(cleaned) || /\b(ship(?:ping)?|delivery)\b.{0,30}\bfree\b/i.test(cleaned)) return null;
+      if (/\b(shipping cost|delivery date|order total|shown at checkout|does not include|including shipping|when shipping)\b/i.test(cleaned)) return null;
+      const patterns = [
+        /(?:\+|plus|add)\s*([₽€$£¥֏₸₺₴₹₩]\s*\d[\d\s.,]*|\d[\d\s.,]*\s*[₽€$£¥֏₸₺₴₹₩])\s*(?:for\s*)?(?:ship(?:ping)?|delivery)\b/i,
+        /\b(?:ship(?:ping)?|delivery)\b(?:\s*(?:cost|fee|charge|from|is|:))?\s*([₽€$£¥֏₸₺₴₹₩]\s*\d[\d\s.,]*|\d[\d\s.,]*\s*[₽€$£¥֏₸₺₴₹₩])/i,
+        /([₽€$£¥֏₸₺₴₹₩]\s*\d[\d\s.,]*|\d[\d\s.,]*\s*[₽€$£¥֏₸₺₴₹₩])\s*(?:for\s*)?(?:ship(?:ping)?|delivery)\b/i
+      ];
+      for (const re of patterns) {
+        const m = cleaned.match(re);
+        const price = parsePriceValue(m && m[1]);
+        if (Number.isFinite(price) && price > 0) {
+          return { price, currency: normalizeCurrency(detectCurrency(m[1]) || detectCurrency(cleaned) || getAmazonCurrency()), text: cleaned };
+        }
+      }
+      return null;
+    };
+    const getDeliveryCost = (root = document) => {
+      const source = root && root.querySelectorAll ? root : document;
+      const selectors = [
+        "#deliveryBlockMessage",
+        "#mir-layout-DELIVERY_BLOCK",
+        "#shippingMessageInsideBuyBox_feature_div",
+        "#amazonGlobal_feature_div",
+        "#exportsTaxMessage_feature_div",
+        "#dynamicDeliveryMessage"
+      ].join(", ");
+      const nodes = [...source.querySelectorAll(selectors)].filter((node) => !node.closest?.(".mp-min-price-badge"));
+      for (const node of nodes) {
+        const info = parseDeliveryCostFromText(node.textContent || "");
+        if (info) return info;
+      }
+      return null;
+    };
+    const withDeliveryCost = (info, root = document) => {
+      if (!info || !Number.isFinite(Number(info.price))) return info;
+      const delivery = getDeliveryCost(root);
+      if (!delivery || !Number.isFinite(Number(delivery.price))) return info;
+      const infoCurrency = info.currency || delivery.currency || "$";
+      const deliveryCurrency = delivery.currency || infoCurrency;
+      if (infoCurrency && deliveryCurrency && infoCurrency !== deliveryCurrency) return info;
+      return {
+        price: Number(info.price) + Number(delivery.price),
+        currency: infoCurrency,
+        text: `${info.text || ""} + delivery ${delivery.text || delivery.price}`.trim()
+      };
+    };
+    const getSelectedVariationPrice = () => {
+      const selected = [
+        ...document.querySelectorAll(
+          [
+            '#twister-plus-inline-twister li[data-initiallyselected="true"]',
+            "#twister-plus-inline-twister .a-button-selected",
+            '#twister-plus-inline-twister input[aria-checked="true"]',
+            "#variation_size_name .a-button-selected",
+            "#variation_color_name .a-button-selected",
+            "#twister .a-button-selected",
+            '#twister input[aria-checked="true"]'
+          ].join(", ")
+        )
+      ].map((node) => node.closest?.("li, .a-button, .swatchElement, [data-asin]") || node).filter((node, index, list) => node && list.indexOf(node) === index);
+      for (const node of selected) {
+        const preferred = node.querySelector?.(".twister_swatch_price, .inline-twister-swatch-price, .dimension-slot-info, .a-price");
+        const fromPreferred = preferred && (parseFromPriceText(preferred.textContent || "") || findPriceInCard(preferred, { defaultCurrency: "$" }));
+        if (fromPreferred && Number.isFinite(Number(fromPreferred.price))) {
+          return withDeliveryCost({ price: Number(fromPreferred.price), currency: fromPreferred.currency || "$", text: preferred.textContent || "" });
+        }
+        const info = parseFromPriceText(node.textContent || "") || findPriceInCard(node, { defaultCurrency: "$" });
+        if (info && Number.isFinite(Number(info.price))) {
+          return withDeliveryCost({ price: Number(info.price), currency: info.currency || "$", text: node.textContent || "" });
+        }
+      }
+      return null;
+    };
     const getPriceRoot = () => document.querySelector("#corePriceDisplay_desktop_feature_div") || document.querySelector("#corePrice_feature_div") || document.querySelector("#apex_desktop") || document.querySelector("#buybox") || document.querySelector("#centerCol") || null;
     const getPagePrice = () => {
       const hiddenValue = document.querySelector('input#priceValue, input[name="priceValue"]')?.value;
@@ -756,7 +844,7 @@
       if (Number.isFinite(hiddenPrice) && hiddenPrice > 0) {
         const symbol = document.querySelector('input#priceSymbol, input[name="priceSymbol"]')?.value || "$";
         const currency = normalizeCurrency(symbol || document.querySelector("input#currencyOfPreference")?.value || "USD") || "$";
-        return { price: hiddenPrice, currency, text: `${symbol}${hiddenValue}` };
+        return withDeliveryCost({ price: hiddenPrice, currency, text: `${symbol}${hiddenValue}` });
       }
       const root = getPriceRoot();
       const preferred = [
@@ -771,11 +859,13 @@
         const nodes = [...document.querySelectorAll(selector)].filter((node) => !isOldPriceNode(node));
         for (const node of nodes) {
           const parsed = parsePriceNode(node);
-          if (parsed) return parsed;
+          if (parsed) return withDeliveryCost(parsed);
         }
       }
+      const selectedVariationPrice = getSelectedVariationPrice();
+      if (selectedVariationPrice) return selectedVariationPrice;
       const info = findPriceInCard(root || document.body, { defaultCurrency: "$" });
-      return info && Number.isFinite(Number(info.price)) ? { price: Number(info.price), currency: info.currency || "$", text: root?.textContent || "" } : null;
+      return info && Number.isFinite(Number(info.price)) ? withDeliveryCost({ price: Number(info.price), currency: info.currency || "$", text: root?.textContent || "" }) : withDeliveryCost({ price: 1, currency: getAmazonCurrency(), text: "Amazon price fallback" });
     };
     const formatPrice = (info) => {
       if (!info || !Number.isFinite(Number(info.price))) return "\u2014";
@@ -1852,6 +1942,45 @@
       if (!Number.isFinite(price)) return null;
       return { price, currency: normalizeCurrency(detectCurrency(text) || "$"), text };
     };
+    const getAmazonCurrency = () => {
+      const explicit = document.querySelector('input#priceSymbol, input[name="priceSymbol"]')?.value || document.querySelector("input#currencyOfPreference")?.value || "";
+      const fromState = [...document.querySelectorAll('script[type="a-state"]')].map((node) => node.textContent || "").find((text) => /"currencyOfPreference"\s*:/.test(text));
+      return normalizeCurrency(detectCurrency(explicit) || explicit || fromState && (fromState.match(/"currencyOfPreference"\s*:\s*"([^"]+)"/) || [])[1] || "USD") || "$";
+    };
+    const parseFromPriceText = (text) => {
+      const cleaned = clean(text);
+      if (!/\b(from|starting\s+at|starts\s+at|options?\s+from)\b/i.test(cleaned)) return null;
+      const price = parsePriceValue(cleaned);
+      if (!Number.isFinite(price)) return null;
+      return { price, currency: normalizeCurrency(detectCurrency(cleaned) || getAmazonCurrency()), text: cleaned };
+    };
+    const getSelectedVariationPrice = () => {
+      const selected = [
+        ...document.querySelectorAll(
+          [
+            '#twister-plus-inline-twister li[data-initiallyselected="true"]',
+            "#twister-plus-inline-twister .a-button-selected",
+            '#twister-plus-inline-twister input[aria-checked="true"]',
+            "#variation_size_name .a-button-selected",
+            "#variation_color_name .a-button-selected",
+            "#twister .a-button-selected",
+            '#twister input[aria-checked="true"]'
+          ].join(", ")
+        )
+      ].map((node) => node.closest?.("li, .a-button, .swatchElement, [data-asin]") || node).filter((node, index, list) => node && list.indexOf(node) === index);
+      for (const node of selected) {
+        const preferred = node.querySelector?.(".twister_swatch_price, .inline-twister-swatch-price, .dimension-slot-info, .a-price");
+        const fromPreferred = preferred && (parseFromPriceText(preferred.textContent || "") || findPriceInCard(preferred, { defaultCurrency: "$" }));
+        if (fromPreferred && Number.isFinite(Number(fromPreferred.price))) {
+          return { price: Number(fromPreferred.price), currency: fromPreferred.currency || "$", text: preferred.textContent || "" };
+        }
+        const info = parseFromPriceText(node.textContent || "") || findPriceInCard(node, { defaultCurrency: "$" });
+        if (info && Number.isFinite(Number(info.price))) {
+          return { price: Number(info.price), currency: info.currency || "$", text: node.textContent || "" };
+        }
+      }
+      return null;
+    };
     const getPagePrice = () => {
       const hiddenValue = document.querySelector('input#priceValue, input[name="priceValue"]')?.value;
       const hiddenPrice = Number(String(hiddenValue || "").replace(",", "."));
@@ -1875,6 +2004,8 @@
           if (parsed) return parsed;
         }
       }
+      const selectedVariationPrice = getSelectedVariationPrice();
+      if (selectedVariationPrice) return selectedVariationPrice;
       const root = getPriceRoot();
       const info = findPriceInCard(root || document.body, { defaultCurrency: "$" });
       return info && Number.isFinite(Number(info.price)) ? { price: Number(info.price), currency: info.currency || "$", text: root?.textContent || "" } : null;
