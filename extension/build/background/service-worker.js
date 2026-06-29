@@ -28,12 +28,18 @@
     historyFetchTtlMs: 15e3
   };
   var DEFAULT_SERVER_URL = "http://127.0.0.1:8765";
-  var PRODUCT_SUMMARY_VERSION = 7;
+  var PRODUCT_SUMMARY_VERSION = 8;
   var WB_OUTLIER_CFG = {
     minNeighborRatio: 2.5,
     maxNeighborSpread: 1.25,
     maxDurationMs: 12 * 60 * 60 * 1e3,
     maxRelativeDuration: 0.35
+  };
+  var OZON_OUTLIER_CFG = {
+    maxNeighborSpread: 1.08,
+    minRelativeDelta: 0.08,
+    minAbsoluteDelta: 50,
+    maxDurationMs: 30 * 60 * 1e3
   };
   var ALI_OUTLIER_CFG = {
     maxNeighborSpread: 1.25,
@@ -988,6 +994,32 @@
     if (currentDuration > ALI_OUTLIER_CFG.maxDurationMs) return false;
     return true;
   };
+  var isOzonIsolatedOutlier = (intervals, index, market) => {
+    if (resolveMarket(market, intervals[index]?.pidKey) !== "ozon") return false;
+    if (index <= 0 || index >= intervals.length - 1) return false;
+    const current = intervals[index];
+    const prev = intervals[index - 1];
+    const next = intervals[index + 1];
+    if (!current || !prev || !next) return false;
+    const currency = String(current.currency || "");
+    if (String(prev.currency || "") !== currency || String(next.currency || "") !== currency) return false;
+    const currentPrice = Number(current.price);
+    const prevPrice = Number(prev.price);
+    const nextPrice = Number(next.price);
+    if (![currentPrice, prevPrice, nextPrice].every((value) => Number.isFinite(value) && value > 0)) return false;
+    const neighborMin = Math.min(prevPrice, nextPrice);
+    const neighborMax = Math.max(prevPrice, nextPrice);
+    if (neighborMax / neighborMin > OZON_OUTLIER_CFG.maxNeighborSpread) return false;
+    const neighborMid = (prevPrice + nextPrice) / 2;
+    const relativeDelta = Math.abs(currentPrice - neighborMid) / Math.max(0.01, neighborMid);
+    const absoluteDelta = Math.abs(currentPrice - neighborMid);
+    if (relativeDelta < OZON_OUTLIER_CFG.minRelativeDelta || absoluteDelta < OZON_OUTLIER_CFG.minAbsoluteDelta) return false;
+    const firstTs = toInt(current.firstTs, 0);
+    const lastTs = toInt(current.lastTs, firstTs);
+    const currentDuration = Math.max(0, lastTs - firstTs);
+    if (currentDuration > OZON_OUTLIER_CFG.maxDurationMs) return false;
+    return true;
+  };
   var isAmazonScaledOutlier = (intervals, index, market) => {
     if (resolveMarket(market, intervals[index]?.pidKey) !== "amazon") return false;
     if (intervals.length < 2) return false;
@@ -1024,9 +1056,15 @@
     if (resolveMarket(market, intervals[0]?.pidKey) !== "amazon" || intervals.length < 3) return intervals;
     return intervals.filter((_, index) => !isAmazonScaledOutlier(intervals, index, market));
   };
+  var filterOzonNoisyIntervals = (rows, market) => {
+    const intervals = sortIntervalsForPid(rows);
+    if (resolveMarket(market, intervals[0]?.pidKey) !== "ozon" || intervals.length < 3) return intervals;
+    return intervals.filter((_, index) => !isOzonIsolatedOutlier(intervals, index, market));
+  };
   var filterIntervalsByMarketHeuristics = (rows, market) => {
     const intervals = sortIntervalsForPid(rows);
     const resolved = resolveMarket(market, intervals[0]?.pidKey);
+    if (resolved === "ozon") return filterOzonNoisyIntervals(intervals, market);
     if (resolved === "aliexpress") return filterAliExpressNoisyIntervals(intervals, market);
     if (resolved === "amazon") return filterAmazonNoisyIntervals(intervals, market);
     if (resolved !== "wb" || intervals.length < 3) return intervals;

@@ -19,26 +19,64 @@
     const pickVisible = (nodes) => (nodes || []).find((el) => el && el.isConnected && el.getClientRects && el.getClientRects().length) || (nodes && nodes[0]) || null;
     const getPriceWidget = () => pickVisible([...document.querySelectorAll('[data-widget="webPrice"]')]);
     const getSaleWidget = () => pickVisible([...document.querySelectorAll('[data-widget="webSale"]')]);
+    const isOldPriceNode = (node) => {
+        if (!node) return false;
+        if (node.closest('del, s')) return true;
+        let cur = node;
+        while (cur && cur !== document.body) {
+            const raw = `${cur.className || ''} ${cur.getAttribute?.('style') || ''}`.toLowerCase();
+            if (/old|strike|cross|line-through|linethrough/.test(raw)) return true;
+            cur = cur.parentElement;
+        }
+        try {
+            return /line-through/i.test(getComputedStyle(node).textDecoration || '');
+        } catch (_) {
+            return false;
+        }
+    };
+    const isBadProductPriceText = (text) => {
+        const t = String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        if (!t || /%/.test(t)) return true;
+        return /балл|кешб|рассроч|достав|возврат|скидк|продав|отзыв|вопрос|единиц|остал|купить|корзин|шт\b|за\s+\d/.test(t);
+    };
+    const getCurrentPriceFromWidget = (widget) => {
+        if (!widget) return null;
+        const nodes = [...widget.querySelectorAll('span, div')]
+            .filter((node) => !node.closest('.mp-price-chart, .mp-min-price-badge'))
+            .map((node) => {
+                const text = String(node.textContent || '').replace(/\s+/g, ' ').trim();
+                if (!text || isBadProductPriceText(text) || isOldPriceNode(node)) return null;
+                const price = parsePriceValue(text);
+                if (!Number.isFinite(price)) return null;
+                const currency = detectCurrency(text) || '₽';
+                const cls = String(node.className || '');
+                let rect = { width: 0, height: 0 };
+                let style = null;
+                try {
+                    rect = node.getBoundingClientRect();
+                    style = getComputedStyle(node);
+                } catch (_) {}
+                if ((rect.width || 0) <= 0 || (rect.height || 0) <= 0) return null;
+                const fontSize = parseFloat(style?.fontSize || '') || 0;
+                const weight = parseFloat(style?.fontWeight || '') || 0;
+                const headlineScore = /tsHeadline|headline/i.test(cls) ? 40 : 0;
+                const score = headlineScore + fontSize + (weight >= 600 ? 10 : 0) - Math.min(20, text.length / 8);
+                return { price, currency, text, score };
+            })
+            .filter(Boolean)
+            .sort((a, b) => (b.score - a.score) || (a.price - b.price));
+        return nodes[0] || null;
+    };
     const getPagePrice = () => {
         const priceWidget = getPriceWidget();
         if (priceWidget) {
-            const headline = priceWidget.querySelector('span[class*="tsHeadline"], .tsHeadline600Large, .tsHeadline500Medium');
-            const headlineText = headline?.textContent || '';
-            if (headlineText) {
-                const headlinePrice = parsePriceValue(headlineText);
-                if (Number.isFinite(headlinePrice)) return { price: headlinePrice, currency: detectCurrency(headlineText) || '₽', text: headlineText };
-            }
-            const text = priceWidget.querySelector('span')?.textContent || priceWidget.textContent || '';
-            const info = findPriceInCard(priceWidget, { defaultCurrency: '₽' });
-            if (info && Number.isFinite(Number(info.price))) return { price: Number(info.price), currency: info.currency || '₽', text };
-            const parsed = parsePriceValue(text);
-            if (Number.isFinite(parsed)) return { price: parsed, currency: detectCurrency(text) || '₽', text };
+            const current = getCurrentPriceFromWidget(priceWidget);
+            if (current) return { price: current.price, currency: current.currency || '₽', text: current.text };
         }
         const saleWidget = getSaleWidget();
         if (!saleWidget) return null;
-        const info = findPriceInCard(saleWidget, { defaultCurrency: '₽' });
-        if (info && Number.isFinite(Number(info.price))) return { price: Number(info.price), currency: info.currency || '₽', text: saleWidget.textContent || '' };
-        return null;
+        const current = getCurrentPriceFromWidget(saleWidget);
+        return current ? { price: current.price, currency: current.currency || '₽', text: current.text } : null;
     };
     function initOzon() {
         const getPid = () => {
@@ -94,6 +132,7 @@
             const m = href.match(/\/product\/[^/]*?(\d{5,})(?:\/|\?|$)/) || href.match(/-(\d{5,})(?:\/|\?|$)/);
             if (m) return m[1];
             if (isOzonCartCard(card)) return '';
+            if (card.closest('[data-widget="skuGrid"]')) return '';
             const image = card.querySelector('img');
             const fromImg = extractIdFromOzonMedia(image?.getAttribute('src'))
                 || extractIdFromOzonMedia(image?.getAttribute('srcset'))
@@ -152,7 +191,6 @@
                 market: 'ozon',
                 cardSelector: [
                     'div[class*="tile-root"]',
-                    '[data-widget="skuGrid"] [data-index]',
                     'article[class*="tile"]',
                     'div[data-sku][class*="tile"]',
                     '[data-widget="cartSplit"] > div',
@@ -167,6 +205,10 @@
             getBadgeTarget: (card) => {
                 if (isOzonCartCard(card)) return getCartBadgeTarget(card);
                 return card.querySelector('.checkout_s0, [class*="checkout_s0"]') || card.querySelector('.checkout_r5, [class*="checkout_r5"]') || card;
+            },
+            shouldCaptureGroup: (group) => {
+                const currentPid = (String(location.pathname || '').match(/\/product\/[^/]*?(\d{5,})(?:\/|$)/) || [])[1] || '';
+                return !currentPid || group.pidKey !== `ozon:${currentPid}`;
             },
         });
     }

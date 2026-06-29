@@ -26,19 +26,60 @@
     function initOzon() {
         ensureScrollTopButton();
 
-        const clickVariantWhenReady = (timeout = 400) => {
-            const find = () => [...document.querySelectorAll('button,[role="button"]')]
-                .find(el => /этот вариант товара/i.test(el.textContent?.trim()));
-            const btn = find();
-            if (btn) { btn.click(); return Promise.resolve(true); }
-            return new Promise(resolve => {
-                const obs = new MutationObserver(() => {
-                    const b = find();
-                    if (b) { b.click(); obs.disconnect(); resolve(true); }
-                });
-                obs.observe(document.body, { childList: true, subtree: true });
-                setTimeout(() => { obs.disconnect(); resolve(false); }, timeout);
-            });
+        const clickVariantWhenReady = async (timeout = 2500) => {
+            const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            const isVisible = (el) => {
+                if (!el || !el.isConnected || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+                const rect = el.getBoundingClientRect();
+                return (rect.width || 0) > 0 && (rect.height || 0) > 0;
+            };
+            const isSelected = (el) => {
+                const raw = [
+                    el.getAttribute?.('aria-pressed') || '',
+                    el.getAttribute?.('aria-selected') || '',
+                    el.getAttribute?.('data-state') || '',
+                    el.getAttribute?.('class') || '',
+                ].join(' ').toLowerCase();
+                return /\b(true|selected|active|checked|current)\b/.test(raw);
+            };
+            const find = () => [...document.querySelectorAll('button,[role="button"],a')]
+                .map((el) => {
+                    const text = normalize(el.innerText || el.textContent || el.getAttribute?.('aria-label') || '');
+                    return { el, text };
+                })
+                .filter(({ el, text }) => {
+                    if (!text || !isVisible(el) || isSelected(el)) return false;
+                    if (!/(отзыв|review|вариант)/i.test(text)) return false;
+                    return /(?:этот|данный|текущ)\s+вариант|только\s+(?:этот|данный|текущ)|this\s+variant/i.test(text);
+                })
+                .sort((a, b) => {
+                    const aExact = /этот вариант товара|только этот вариант/i.test(a.text) ? 0 : 1;
+                    const bExact = /этот вариант товара|только этот вариант/i.test(b.text) ? 0 : 1;
+                    return aExact - bExact;
+                })[0]?.el || null;
+            const clickNode = async (node) => {
+                if (!node) return false;
+                try { node.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' }); } catch (_) {}
+                await sleep(80);
+                const targets = [
+                    node,
+                    node.querySelector?.('button,[role="button"],a'),
+                    node.closest?.('button,[role="button"],a'),
+                ].filter(Boolean);
+                for (const target of [...new Set(targets)]) {
+                    try { target.click(); } catch (_) {}
+                    await sleep(80);
+                }
+                return true;
+            };
+
+            const started = Date.now();
+            while ((Date.now() - started) < timeout) {
+                const btn = find();
+                if (btn && await clickNode(btn)) return true;
+                await sleep(180);
+            }
+            return false;
         };
 
         const getRecommendationsTopY = () => {
@@ -557,8 +598,9 @@
             await sleep(160);
 
             if (switchToVariant) {
-                await clickVariantWhenReady();
-                await sleep(600);
+                const switched = await clickVariantWhenReady();
+                if (!switched) console.warn('[OWB] Ozon variant reviews switch button was not found');
+                await sleep(switched ? 240 : 80);
             }
             reviewSection = resolveReviewSection(reviewSection) || reviewSection;
 
@@ -998,9 +1040,10 @@
             }
         }
         setRunExport(async (opts = {}) => {
+            const allReviews = opts.allReviews === true;
             return buildOzonExportPackage({
                 includeReviews: opts.includeReviews !== false,
-                switchToVariant: false,
+                switchToVariant: allReviews ? false : true,
                 maxReviews: 100,
             });
         });

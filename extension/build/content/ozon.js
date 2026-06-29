@@ -677,28 +677,62 @@
     } = Exporter;
     function initOzon() {
       ensureScrollTopButton();
-      const clickVariantWhenReady = (timeout = 400) => {
-        const find = () => [...document.querySelectorAll('button,[role="button"]')].find((el) => /этот вариант товара/i.test(el.textContent?.trim()));
-        const btn = find();
-        if (btn) {
-          btn.click();
-          return Promise.resolve(true);
-        }
-        return new Promise((resolve) => {
-          const obs = new MutationObserver(() => {
-            const b = find();
-            if (b) {
-              b.click();
-              obs.disconnect();
-              resolve(true);
+      const clickVariantWhenReady = async (timeout = 2500) => {
+        const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+        const isVisible = (el) => {
+          if (!el || !el.isConnected || el.disabled || el.getAttribute("aria-disabled") === "true") return false;
+          const rect = el.getBoundingClientRect();
+          return (rect.width || 0) > 0 && (rect.height || 0) > 0;
+        };
+        const isSelected = (el) => {
+          const raw = [
+            el.getAttribute?.("aria-pressed") || "",
+            el.getAttribute?.("aria-selected") || "",
+            el.getAttribute?.("data-state") || "",
+            el.getAttribute?.("class") || ""
+          ].join(" ").toLowerCase();
+          return /\b(true|selected|active|checked|current)\b/.test(raw);
+        };
+        const find = () => [...document.querySelectorAll('button,[role="button"],a')].map((el) => {
+          const text = normalize(el.innerText || el.textContent || el.getAttribute?.("aria-label") || "");
+          return { el, text };
+        }).filter(({ el, text }) => {
+          if (!text || !isVisible(el) || isSelected(el)) return false;
+          if (!/(отзыв|review|вариант)/i.test(text)) return false;
+          return /(?:этот|данный|текущ)\s+вариант|только\s+(?:этот|данный|текущ)|this\s+variant/i.test(text);
+        }).sort((a, b) => {
+          const aExact = /этот вариант товара|только этот вариант/i.test(a.text) ? 0 : 1;
+          const bExact = /этот вариант товара|только этот вариант/i.test(b.text) ? 0 : 1;
+          return aExact - bExact;
+        })[0]?.el || null;
+        const clickNode = async (node) => {
+          if (!node) return false;
+          try {
+            node.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" });
+          } catch (_) {
+          }
+          await sleep(80);
+          const targets = [
+            node,
+            node.querySelector?.('button,[role="button"],a'),
+            node.closest?.('button,[role="button"],a')
+          ].filter(Boolean);
+          for (const target of [...new Set(targets)]) {
+            try {
+              target.click();
+            } catch (_) {
             }
-          });
-          obs.observe(document.body, { childList: true, subtree: true });
-          setTimeout(() => {
-            obs.disconnect();
-            resolve(false);
-          }, timeout);
-        });
+            await sleep(80);
+          }
+          return true;
+        };
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          const btn = find();
+          if (btn && await clickNode(btn)) return true;
+          await sleep(180);
+        }
+        return false;
       };
       const getRecommendationsTopY = () => {
         const headingMarkers = [...document.querySelectorAll("h2, h3, h4")].filter((el) => /(рекомендуем|похожие товары|с этим товаром|вам может понравиться)/i.test(el.textContent || "")).map((el) => window.scrollY + el.getBoundingClientRect().top);
@@ -1129,8 +1163,9 @@ ${shown.join("\n")}`;
         if (!reviewSection) return { header: `\u041E\u0442\u0437\u044B\u0432\u044B: \u043D\u0435\u0442 \u043E\u0442\u0437\u044B\u0432\u043E\u0432. \u0421\u0440\u0435\u0434\u043D\u044F\u044F \u043E\u0446\u0435\u043D\u043A\u0430: ${avgFromInfo}`, items: [] };
         await sleep(160);
         if (switchToVariant) {
-          await clickVariantWhenReady();
-          await sleep(600);
+          const switched = await clickVariantWhenReady();
+          if (!switched) console.warn("[OWB] Ozon variant reviews switch button was not found");
+          await sleep(switched ? 240 : 80);
         }
         reviewSection = resolveReviewSection(reviewSection) || reviewSection;
         const refreshReviewSection = () => {
@@ -1539,9 +1574,10 @@ ${shown.join("\n")}`;
         }
       }
       setRunExport(async (opts = {}) => {
+        const allReviews = opts.allReviews === true;
         return buildOzonExportPackage({
           includeReviews: opts.includeReviews !== false,
-          switchToVariant: false,
+          switchToVariant: allReviews ? false : true,
           maxReviews: 100
         });
       });
@@ -1579,8 +1615,11 @@ ${shown.join("\n")}`;
       getAliCurrencyFromAttrs
     } = MP;
     const CFG = {
-      productPollMs: 2500,
-      cardPollMs: 3500,
+      productUpdateDebounceMs: 700,
+      cardUpdateDebounceMs: 900,
+      updateMinGapMs: 1800,
+      productStableMs: 2200,
+      productStableSamples: 2,
       renderHeartbeatMs: 8e3,
       captureHeartbeatMs: 6e4,
       maxCardGroups: 220
@@ -1595,6 +1634,98 @@ ${shown.join("\n")}`;
     const errorText = (err) => String(err && err.message ? err.message : err);
     const isRuntimeInvalidatedError = (err) => /Extension context invalidated|message channel closed|Extension runtime is unavailable/i.test(errorText(err));
     const isRuntimeTransientError = (err) => /Runtime message timeout|Receiving end does not exist|The message port closed before a response was received/i.test(errorText(err));
+    const isElementNode = (node) => node && node.nodeType === Node.ELEMENT_NODE;
+    const isOwnMonitorNode = (node) => {
+      const el = isElementNode(node) ? node : node?.parentElement;
+      return !!(el && el.closest && el.closest(".mp-price-chart, .mp-min-price-badge"));
+    };
+    const hasElementChanges = (mutation) => {
+      if (!mutation) return false;
+      if (mutation.type !== "childList") return false;
+      if (isOwnMonitorNode(mutation.target)) return false;
+      return [...mutation.addedNodes, ...mutation.removedNodes].some((node) => isElementNode(node) && !isOwnMonitorNode(node));
+    };
+    const patchHistoryUpdateEvents = /* @__PURE__ */ (() => {
+      let patched = false;
+      return () => {
+        if (patched) return;
+        patched = true;
+        const notify = () => {
+          try {
+            window.dispatchEvent(new CustomEvent("owb:page-updated"));
+          } catch (_) {
+          }
+        };
+        ["pushState", "replaceState"].forEach((name) => {
+          const original = history[name];
+          if (typeof original !== "function") return;
+          history[name] = function(...args) {
+            const result = original.apply(this, args);
+            setTimeout(notify, 0);
+            return result;
+          };
+        });
+        window.addEventListener("popstate", notify);
+        window.addEventListener("hashchange", notify);
+      };
+    })();
+    const watchPageUpdates = (callback, opts = {}) => {
+      const debounceMs = Math.max(100, Number(opts.debounceMs) || 800);
+      const minGapMs = Math.max(0, Number(opts.minGapMs) || CFG.updateMinGapMs);
+      let stopped = false;
+      let timer = null;
+      let lastRunTs = 0;
+      let pendingReason = "init";
+      const run = () => {
+        if (stopped) return;
+        timer = null;
+        lastRunTs = now();
+        callback(pendingReason);
+        pendingReason = "update";
+      };
+      const schedule = (reason = "update", immediate = false) => {
+        if (stopped) return;
+        pendingReason = reason;
+        const t = now();
+        const sinceLastRun = t - lastRunTs;
+        const waitForGap = Math.max(0, minGapMs - sinceLastRun);
+        const delay = immediate ? 0 : Math.max(debounceMs, waitForGap);
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(run, delay);
+      };
+      const observer = new MutationObserver((mutations) => {
+        if (mutations.some(hasElementChanges)) schedule("dom");
+      });
+      const observeRoot = () => {
+        const root = document.body || document.documentElement;
+        if (!root) return false;
+        observer.observe(root, {
+          childList: true,
+          subtree: true
+        });
+        return true;
+      };
+      if (!observeRoot()) {
+        document.addEventListener("DOMContentLoaded", () => observeRoot(), { once: true });
+      }
+      patchHistoryUpdateEvents();
+      const onPageUpdated = () => schedule("navigation", true);
+      const onVisible = () => {
+        if (!document.hidden) schedule("visible", true);
+      };
+      window.addEventListener("owb:page-updated", onPageUpdated);
+      window.addEventListener("pageshow", onPageUpdated);
+      document.addEventListener("visibilitychange", onVisible);
+      schedule("init", true);
+      return () => {
+        stopped = true;
+        if (timer) clearTimeout(timer);
+        observer.disconnect();
+        window.removeEventListener("owb:page-updated", onPageUpdated);
+        window.removeEventListener("pageshow", onPageUpdated);
+        document.removeEventListener("visibilitychange", onVisible);
+      };
+    };
     const sendRuntimeMessage = (payload, timeoutMs = 15e3) => new Promise((resolve, reject) => {
       if (!hasRuntime()) {
         reject(new Error("Extension runtime is unavailable"));
@@ -1759,14 +1890,14 @@ ${shown.join("\n")}`;
       });
       return [...dedupe.values()].sort((a, b) => a.ts - b.ts);
     };
-    const renderChart = (container, history, opts = {}) => {
+    const renderChart = (container, history2, opts = {}) => {
       if (!container) return;
       const canvas = container.querySelector("canvas");
       const stats = container.querySelector(".mp-price-chart__stats");
       const dates = container.querySelectorAll(".mp-price-chart__dates span");
       const tooltip = container.querySelector(".mp-price-tooltip");
       const currency = opts.currency || "\u20BD";
-      const data = [...history || []].filter(Boolean).sort((a, b) => a.ts - b.ts);
+      const data = [...history2 || []].filter(Boolean).sort((a, b) => a.ts - b.ts);
       if (!data.length) {
         stats.textContent = "\u041D\u0435\u0442 \u0434\u0430\u043D\u043D\u044B\u0445";
         if (dates[0]) dates[0].textContent = "";
@@ -1917,6 +2048,7 @@ ${shown.join("\n")}`;
       const currency = String(priceInfo?.currency || "") || detectCurrency(String(priceInfo?.text || "")) || "";
       return { pidKey, pid: String(pid || ""), price, currency, ts };
     };
+    const sameCaptureRecord = (a, b) => !!(a && b && String(a.pidKey || "") === String(b.pidKey || "") && eq(a.price, b.price) && String(a.currency || "") === String(b.currency || ""));
     const startProductTracker = (opts) => {
       const state = {
         running: false,
@@ -1927,7 +2059,64 @@ ${shown.join("\n")}`;
         lastRecordPidKey: "",
         lastCaptureTs: 0,
         lastRenderTs: 0,
+        pendingRecord: null,
+        pendingFirstSeenTs: 0,
+        pendingSamples: 0,
+        pendingTimer: null,
         stopped: false
+      };
+      const clearPendingCapture = () => {
+        if (state.pendingTimer) clearTimeout(state.pendingTimer);
+        state.pendingTimer = null;
+        state.pendingRecord = null;
+        state.pendingFirstSeenTs = 0;
+        state.pendingSamples = 0;
+      };
+      const schedulePendingCaptureCheck = () => {
+        if (state.pendingTimer) clearTimeout(state.pendingTimer);
+        state.pendingTimer = setTimeout(() => {
+          state.pendingTimer = null;
+          tick();
+        }, CFG.productStableMs);
+      };
+      const captureStableRecord = async (record) => {
+        if (!record) {
+          clearPendingCapture();
+          return false;
+        }
+        const currentCaptured = {
+          pidKey: state.lastRecordPidKey,
+          price: state.lastPrice,
+          currency: state.lastCurrency
+        };
+        const sameAsCaptured = sameCaptureRecord(record, currentCaptured);
+        const heartbeat = sameAsCaptured && state.lastCaptureTs && now() - state.lastCaptureTs >= CFG.captureHeartbeatMs;
+        if (sameAsCaptured && !heartbeat) {
+          clearPendingCapture();
+          return false;
+        }
+        if (!heartbeat) {
+          if (!sameCaptureRecord(state.pendingRecord, record)) {
+            state.pendingRecord = { ...record };
+            state.pendingFirstSeenTs = now();
+            state.pendingSamples = 1;
+            schedulePendingCaptureCheck();
+            return false;
+          }
+          state.pendingSamples += 1;
+          const stableEnough = now() - state.pendingFirstSeenTs >= CFG.productStableMs && state.pendingSamples >= CFG.productStableSamples;
+          if (!stableEnough) {
+            schedulePendingCaptureCheck();
+            return false;
+          }
+        }
+        await bgCaptureBatch([{ ...record, ts: now() }]);
+        state.lastRecordPidKey = record.pidKey;
+        state.lastPrice = record.price;
+        state.lastCurrency = record.currency;
+        state.lastCaptureTs = now();
+        clearPendingCapture();
+        return true;
       };
       const tick = async () => {
         if (state.stopped) return;
@@ -1944,6 +2133,7 @@ ${shown.join("\n")}`;
             state.lastRecordPidKey = "";
             state.lastCaptureTs = 0;
             state.lastRenderTs = 0;
+            clearPendingCapture();
             return;
           }
           const pid = await opts.getPid();
@@ -1952,30 +2142,19 @@ ${shown.join("\n")}`;
           if (nextPidKey && nextPidKey !== state.pidKey) {
             state.pidKey = nextPidKey;
             state.lastRenderTs = 0;
+            clearPendingCapture();
           }
           const priceInfo = opts.getPrice();
           const anchor = opts.getAnchor ? opts.getAnchor() : null;
           state.chart = ensureChartContainer(state.chart, anchor, !anchor);
           setChartEditorTarget(state.chart, state.pidKey, priceInfo?.currency || state.lastCurrency || "");
           const record = toCaptureRecord(state.pidKey, pid, priceInfo);
-          let captured = false;
-          if (record) {
-            const changed = state.lastRecordPidKey !== record.pidKey || !eq(state.lastPrice, record.price) || state.lastCurrency !== record.currency;
-            const heartbeat = !state.lastCaptureTs || now() - state.lastCaptureTs >= CFG.captureHeartbeatMs;
-            if (changed || heartbeat) {
-              await bgCaptureBatch([record]);
-              state.lastRecordPidKey = record.pidKey;
-              state.lastPrice = record.price;
-              state.lastCurrency = record.currency;
-              state.lastCaptureTs = now();
-              captured = true;
-            }
-          }
+          const captured = await captureStableRecord(record);
           const t = now();
           if (state.pidKey && (captured || !state.lastRenderTs || t - state.lastRenderTs >= CFG.renderHeartbeatMs)) {
             const intervals = await bgGetHistory(state.pidKey, record?.currency || state.lastCurrency || "");
-            const history = intervalsToSeries(intervals);
-            renderChart(state.chart, history, { currency: record?.currency || state.lastCurrency || "\u20BD" });
+            const history2 = intervalsToSeries(intervals);
+            renderChart(state.chart, history2, { currency: record?.currency || state.lastCurrency || "\u20BD" });
             state.lastRenderTs = t;
           } else if (!state.pidKey) {
             renderChart(state.chart, [], { currency: "\u20BD" });
@@ -1983,7 +2162,8 @@ ${shown.join("\n")}`;
         } catch (err) {
           if (isRuntimeInvalidatedError(err)) {
             state.stopped = true;
-            if (state.intervalId) clearInterval(state.intervalId);
+            clearPendingCapture();
+            if (state.stopWatching) state.stopWatching();
             return;
           }
           if (isRuntimeTransientError(err)) return;
@@ -1992,8 +2172,10 @@ ${shown.join("\n")}`;
           state.running = false;
         }
       };
-      state.intervalId = setInterval(tick, CFG.productPollMs);
-      tick();
+      state.stopWatching = watchPageUpdates(tick, {
+        debounceMs: CFG.productUpdateDebounceMs,
+        minGapMs: CFG.updateMinGapMs
+      });
     };
     const isBadgeCardCandidate = (card, market) => {
       if (!card || !card.isConnected) return false;
@@ -2053,6 +2235,7 @@ ${shown.join("\n")}`;
             const rec = toCaptureRecord(group.pidKey, group.pid, group.priceInfo, t);
             if (!rec) return;
             preferredCurrencies[group.pidKey] = rec.currency;
+            if (typeof opts.shouldCaptureGroup === "function" && opts.shouldCaptureGroup(group) === false) return;
             const prev = captureState.get(group.pidKey) || { price: NaN, currency: "", ts: 0 };
             const changed = !eq(prev.price, rec.price) || prev.currency !== rec.currency;
             const heartbeat = !prev.ts || t - prev.ts >= CFG.captureHeartbeatMs;
@@ -2082,7 +2265,7 @@ ${shown.join("\n")}`;
         } catch (err) {
           if (isRuntimeInvalidatedError(err)) {
             stopped = true;
-            if (intervalId) clearInterval(intervalId);
+            if (stopWatching) stopWatching();
             return;
           }
           if (isRuntimeTransientError(err)) return;
@@ -2091,8 +2274,10 @@ ${shown.join("\n")}`;
           running = false;
         }
       };
-      const intervalId = setInterval(tick, CFG.cardPollMs);
-      tick();
+      const stopWatching = watchPageUpdates(tick, {
+        debounceMs: CFG.cardUpdateDebounceMs,
+        minGapMs: CFG.updateMinGapMs
+      });
     };
     let currentProductDetector = null;
     const setCurrentProductDetector = (detector) => {
@@ -2169,26 +2354,61 @@ ${shown.join("\n")}`;
     const pickVisible = (nodes) => (nodes || []).find((el) => el && el.isConnected && el.getClientRects && el.getClientRects().length) || nodes && nodes[0] || null;
     const getPriceWidget = () => pickVisible([...document.querySelectorAll('[data-widget="webPrice"]')]);
     const getSaleWidget = () => pickVisible([...document.querySelectorAll('[data-widget="webSale"]')]);
+    const isOldPriceNode = (node) => {
+      if (!node) return false;
+      if (node.closest("del, s")) return true;
+      let cur = node;
+      while (cur && cur !== document.body) {
+        const raw = `${cur.className || ""} ${cur.getAttribute?.("style") || ""}`.toLowerCase();
+        if (/old|strike|cross|line-through|linethrough/.test(raw)) return true;
+        cur = cur.parentElement;
+      }
+      try {
+        return /line-through/i.test(getComputedStyle(node).textDecoration || "");
+      } catch (_) {
+        return false;
+      }
+    };
+    const isBadProductPriceText = (text) => {
+      const t = String(text || "").replace(/\s+/g, " ").trim().toLowerCase();
+      if (!t || /%/.test(t)) return true;
+      return /балл|кешб|рассроч|достав|возврат|скидк|продав|отзыв|вопрос|единиц|остал|купить|корзин|шт\b|за\s+\d/.test(t);
+    };
+    const getCurrentPriceFromWidget = (widget) => {
+      if (!widget) return null;
+      const nodes = [...widget.querySelectorAll("span, div")].filter((node) => !node.closest(".mp-price-chart, .mp-min-price-badge")).map((node) => {
+        const text = String(node.textContent || "").replace(/\s+/g, " ").trim();
+        if (!text || isBadProductPriceText(text) || isOldPriceNode(node)) return null;
+        const price = parsePriceValue(text);
+        if (!Number.isFinite(price)) return null;
+        const currency = detectCurrency(text) || "\u20BD";
+        const cls = String(node.className || "");
+        let rect = { width: 0, height: 0 };
+        let style = null;
+        try {
+          rect = node.getBoundingClientRect();
+          style = getComputedStyle(node);
+        } catch (_) {
+        }
+        if ((rect.width || 0) <= 0 || (rect.height || 0) <= 0) return null;
+        const fontSize = parseFloat(style?.fontSize || "") || 0;
+        const weight = parseFloat(style?.fontWeight || "") || 0;
+        const headlineScore = /tsHeadline|headline/i.test(cls) ? 40 : 0;
+        const score = headlineScore + fontSize + (weight >= 600 ? 10 : 0) - Math.min(20, text.length / 8);
+        return { price, currency, text, score };
+      }).filter(Boolean).sort((a, b) => b.score - a.score || a.price - b.price);
+      return nodes[0] || null;
+    };
     const getPagePrice = () => {
       const priceWidget = getPriceWidget();
       if (priceWidget) {
-        const headline = priceWidget.querySelector('span[class*="tsHeadline"], .tsHeadline600Large, .tsHeadline500Medium');
-        const headlineText = headline?.textContent || "";
-        if (headlineText) {
-          const headlinePrice = parsePriceValue(headlineText);
-          if (Number.isFinite(headlinePrice)) return { price: headlinePrice, currency: detectCurrency(headlineText) || "\u20BD", text: headlineText };
-        }
-        const text = priceWidget.querySelector("span")?.textContent || priceWidget.textContent || "";
-        const info2 = findPriceInCard(priceWidget, { defaultCurrency: "\u20BD" });
-        if (info2 && Number.isFinite(Number(info2.price))) return { price: Number(info2.price), currency: info2.currency || "\u20BD", text };
-        const parsed = parsePriceValue(text);
-        if (Number.isFinite(parsed)) return { price: parsed, currency: detectCurrency(text) || "\u20BD", text };
+        const current2 = getCurrentPriceFromWidget(priceWidget);
+        if (current2) return { price: current2.price, currency: current2.currency || "\u20BD", text: current2.text };
       }
       const saleWidget = getSaleWidget();
       if (!saleWidget) return null;
-      const info = findPriceInCard(saleWidget, { defaultCurrency: "\u20BD" });
-      if (info && Number.isFinite(Number(info.price))) return { price: Number(info.price), currency: info.currency || "\u20BD", text: saleWidget.textContent || "" };
-      return null;
+      const current = getCurrentPriceFromWidget(saleWidget);
+      return current ? { price: current.price, currency: current.currency || "\u20BD", text: current.text } : null;
     };
     function initOzon() {
       const getPid = () => {
@@ -2243,6 +2463,7 @@ ${shown.join("\n")}`;
         const m = href.match(/\/product\/[^/]*?(\d{5,})(?:\/|\?|$)/) || href.match(/-(\d{5,})(?:\/|\?|$)/);
         if (m) return m[1];
         if (isOzonCartCard(card)) return "";
+        if (card.closest('[data-widget="skuGrid"]')) return "";
         const image = card.querySelector("img");
         const fromImg = extractIdFromOzonMedia(image?.getAttribute("src")) || extractIdFromOzonMedia(image?.getAttribute("srcset")) || extractIdFromOzonMedia(image?.currentSrc);
         if (fromImg) return fromImg;
@@ -2298,7 +2519,6 @@ ${shown.join("\n")}`;
           market: "ozon",
           cardSelector: [
             'div[class*="tile-root"]',
-            '[data-widget="skuGrid"] [data-index]',
             'article[class*="tile"]',
             'div[data-sku][class*="tile"]',
             '[data-widget="cartSplit"] > div',
@@ -2313,6 +2533,10 @@ ${shown.join("\n")}`;
         getBadgeTarget: (card) => {
           if (isOzonCartCard(card)) return getCartBadgeTarget(card);
           return card.querySelector('.checkout_s0, [class*="checkout_s0"]') || card.querySelector('.checkout_r5, [class*="checkout_r5"]') || card;
+        },
+        shouldCaptureGroup: (group) => {
+          const currentPid = (String(location.pathname || "").match(/\/product\/[^/]*?(\d{5,})(?:\/|$)/) || [])[1] || "";
+          return !currentPid || group.pidKey !== `ozon:${currentPid}`;
         }
       });
     }

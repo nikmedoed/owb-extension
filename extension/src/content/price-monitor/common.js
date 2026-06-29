@@ -22,8 +22,11 @@
     } = MP;
 
 const CFG = {
-    productPollMs: 2500,
-    cardPollMs: 3500,
+    productUpdateDebounceMs: 700,
+    cardUpdateDebounceMs: 900,
+    updateMinGapMs: 1800,
+    productStableMs: 2200,
+    productStableSamples: 2,
     renderHeartbeatMs: 8000,
     captureHeartbeatMs: 60000,
     maxCardGroups: 220,
@@ -39,6 +42,100 @@ const CFG = {
     const errorText = (err) => String(err && err.message ? err.message : err);
     const isRuntimeInvalidatedError = (err) => /Extension context invalidated|message channel closed|Extension runtime is unavailable/i.test(errorText(err));
     const isRuntimeTransientError = (err) => /Runtime message timeout|Receiving end does not exist|The message port closed before a response was received/i.test(errorText(err));
+    const isElementNode = (node) => node && node.nodeType === Node.ELEMENT_NODE;
+    const isOwnMonitorNode = (node) => {
+        const el = isElementNode(node) ? node : node?.parentElement;
+        return !!(el && el.closest && el.closest('.mp-price-chart, .mp-min-price-badge'));
+    };
+    const hasElementChanges = (mutation) => {
+        if (!mutation) return false;
+        if (mutation.type !== 'childList') return false;
+        if (isOwnMonitorNode(mutation.target)) return false;
+        return [...mutation.addedNodes, ...mutation.removedNodes]
+            .some((node) => isElementNode(node) && !isOwnMonitorNode(node));
+    };
+    const patchHistoryUpdateEvents = (() => {
+        let patched = false;
+        return () => {
+            if (patched) return;
+            patched = true;
+            const notify = () => {
+                try { window.dispatchEvent(new CustomEvent('owb:page-updated')); } catch (_) {}
+            };
+            ['pushState', 'replaceState'].forEach((name) => {
+                const original = history[name];
+                if (typeof original !== 'function') return;
+                history[name] = function (...args) {
+                    const result = original.apply(this, args);
+                    setTimeout(notify, 0);
+                    return result;
+                };
+            });
+            window.addEventListener('popstate', notify);
+            window.addEventListener('hashchange', notify);
+        };
+    })();
+    const watchPageUpdates = (callback, opts = {}) => {
+        const debounceMs = Math.max(100, Number(opts.debounceMs) || 800);
+        const minGapMs = Math.max(0, Number(opts.minGapMs) || CFG.updateMinGapMs);
+        let stopped = false;
+        let timer = null;
+        let lastRunTs = 0;
+        let pendingReason = 'init';
+
+        const run = () => {
+            if (stopped) return;
+            timer = null;
+            lastRunTs = now();
+            callback(pendingReason);
+            pendingReason = 'update';
+        };
+        const schedule = (reason = 'update', immediate = false) => {
+            if (stopped) return;
+            pendingReason = reason;
+            const t = now();
+            const sinceLastRun = t - lastRunTs;
+            const waitForGap = Math.max(0, minGapMs - sinceLastRun);
+            const delay = immediate ? 0 : Math.max(debounceMs, waitForGap);
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(run, delay);
+        };
+
+        const observer = new MutationObserver((mutations) => {
+            if (mutations.some(hasElementChanges)) schedule('dom');
+        });
+        const observeRoot = () => {
+            const root = document.body || document.documentElement;
+            if (!root) return false;
+            observer.observe(root, {
+                childList: true,
+                subtree: true,
+            });
+            return true;
+        };
+        if (!observeRoot()) {
+            document.addEventListener('DOMContentLoaded', () => observeRoot(), { once: true });
+        }
+
+        patchHistoryUpdateEvents();
+        const onPageUpdated = () => schedule('navigation', true);
+        const onVisible = () => {
+            if (!document.hidden) schedule('visible', true);
+        };
+        window.addEventListener('owb:page-updated', onPageUpdated);
+        window.addEventListener('pageshow', onPageUpdated);
+        document.addEventListener('visibilitychange', onVisible);
+
+        schedule('init', true);
+        return () => {
+            stopped = true;
+            if (timer) clearTimeout(timer);
+            observer.disconnect();
+            window.removeEventListener('owb:page-updated', onPageUpdated);
+            window.removeEventListener('pageshow', onPageUpdated);
+            document.removeEventListener('visibilitychange', onVisible);
+        };
+    };
 
     const sendRuntimeMessage = (payload, timeoutMs = 15000) => new Promise((resolve, reject) => {
         if (!hasRuntime()) {
@@ -381,6 +478,10 @@ const CFG = {
         const currency = String(priceInfo?.currency || '') || detectCurrency(String(priceInfo?.text || '')) || '';
         return { pidKey, pid: String(pid || ''), price, currency, ts };
     };
+    const sameCaptureRecord = (a, b) => !!(a && b
+        && String(a.pidKey || '') === String(b.pidKey || '')
+        && eq(a.price, b.price)
+        && String(a.currency || '') === String(b.currency || ''));
 
     const startProductTracker = (opts) => {
         const state = {
@@ -392,7 +493,65 @@ const CFG = {
             lastRecordPidKey: '',
             lastCaptureTs: 0,
             lastRenderTs: 0,
+            pendingRecord: null,
+            pendingFirstSeenTs: 0,
+            pendingSamples: 0,
+            pendingTimer: null,
             stopped: false,
+        };
+        const clearPendingCapture = () => {
+            if (state.pendingTimer) clearTimeout(state.pendingTimer);
+            state.pendingTimer = null;
+            state.pendingRecord = null;
+            state.pendingFirstSeenTs = 0;
+            state.pendingSamples = 0;
+        };
+        const schedulePendingCaptureCheck = () => {
+            if (state.pendingTimer) clearTimeout(state.pendingTimer);
+            state.pendingTimer = setTimeout(() => {
+                state.pendingTimer = null;
+                tick();
+            }, CFG.productStableMs);
+        };
+        const captureStableRecord = async (record) => {
+            if (!record) {
+                clearPendingCapture();
+                return false;
+            }
+            const currentCaptured = {
+                pidKey: state.lastRecordPidKey,
+                price: state.lastPrice,
+                currency: state.lastCurrency,
+            };
+            const sameAsCaptured = sameCaptureRecord(record, currentCaptured);
+            const heartbeat = sameAsCaptured && state.lastCaptureTs && (now() - state.lastCaptureTs) >= CFG.captureHeartbeatMs;
+            if (sameAsCaptured && !heartbeat) {
+                clearPendingCapture();
+                return false;
+            }
+            if (!heartbeat) {
+                if (!sameCaptureRecord(state.pendingRecord, record)) {
+                    state.pendingRecord = { ...record };
+                    state.pendingFirstSeenTs = now();
+                    state.pendingSamples = 1;
+                    schedulePendingCaptureCheck();
+                    return false;
+                }
+                state.pendingSamples += 1;
+                const stableEnough = (now() - state.pendingFirstSeenTs) >= CFG.productStableMs
+                    && state.pendingSamples >= CFG.productStableSamples;
+                if (!stableEnough) {
+                    schedulePendingCaptureCheck();
+                    return false;
+                }
+            }
+            await bgCaptureBatch([{ ...record, ts: now() }]);
+            state.lastRecordPidKey = record.pidKey;
+            state.lastPrice = record.price;
+            state.lastCurrency = record.currency;
+            state.lastCaptureTs = now();
+            clearPendingCapture();
+            return true;
         };
         const tick = async () => {
             if (state.stopped) return;
@@ -409,6 +568,7 @@ const CFG = {
                     state.lastRecordPidKey = '';
                     state.lastCaptureTs = 0;
                     state.lastRenderTs = 0;
+                    clearPendingCapture();
                     return;
                 }
 
@@ -418,6 +578,7 @@ const CFG = {
                 if (nextPidKey && nextPidKey !== state.pidKey) {
                     state.pidKey = nextPidKey;
                     state.lastRenderTs = 0;
+                    clearPendingCapture();
                 }
                 const priceInfo = opts.getPrice();
                 const anchor = opts.getAnchor ? opts.getAnchor() : null;
@@ -425,19 +586,7 @@ const CFG = {
                 setChartEditorTarget(state.chart, state.pidKey, priceInfo?.currency || state.lastCurrency || '');
 
                 const record = toCaptureRecord(state.pidKey, pid, priceInfo);
-                let captured = false;
-                if (record) {
-                    const changed = state.lastRecordPidKey !== record.pidKey || !eq(state.lastPrice, record.price) || state.lastCurrency !== record.currency;
-                    const heartbeat = !state.lastCaptureTs || (now() - state.lastCaptureTs) >= CFG.captureHeartbeatMs;
-                    if (changed || heartbeat) {
-                        await bgCaptureBatch([record]);
-                        state.lastRecordPidKey = record.pidKey;
-                        state.lastPrice = record.price;
-                        state.lastCurrency = record.currency;
-                        state.lastCaptureTs = now();
-                        captured = true;
-                    }
-                }
+                const captured = await captureStableRecord(record);
 
                 const t = now();
                 if (state.pidKey && (captured || !state.lastRenderTs || (t - state.lastRenderTs) >= CFG.renderHeartbeatMs)) {
@@ -451,7 +600,8 @@ const CFG = {
             } catch (err) {
                 if (isRuntimeInvalidatedError(err)) {
                     state.stopped = true;
-                    if (state.intervalId) clearInterval(state.intervalId);
+                    clearPendingCapture();
+                    if (state.stopWatching) state.stopWatching();
                     return;
                 }
                 if (isRuntimeTransientError(err)) return;
@@ -460,8 +610,10 @@ const CFG = {
                 state.running = false;
             }
         };
-        state.intervalId = setInterval(tick, CFG.productPollMs);
-        tick();
+        state.stopWatching = watchPageUpdates(tick, {
+            debounceMs: CFG.productUpdateDebounceMs,
+            minGapMs: CFG.updateMinGapMs,
+        });
     };
 
     const isBadgeCardCandidate = (card, market) => {
@@ -535,6 +687,7 @@ const CFG = {
                     const rec = toCaptureRecord(group.pidKey, group.pid, group.priceInfo, t);
                     if (!rec) return;
                     preferredCurrencies[group.pidKey] = rec.currency;
+                    if (typeof opts.shouldCaptureGroup === 'function' && opts.shouldCaptureGroup(group) === false) return;
                     const prev = captureState.get(group.pidKey) || { price: NaN, currency: '', ts: 0 };
                     const changed = !eq(prev.price, rec.price) || prev.currency !== rec.currency;
                     const heartbeat = !prev.ts || (t - prev.ts) >= CFG.captureHeartbeatMs;
@@ -565,7 +718,7 @@ const CFG = {
             } catch (err) {
                 if (isRuntimeInvalidatedError(err)) {
                     stopped = true;
-                    if (intervalId) clearInterval(intervalId);
+                    if (stopWatching) stopWatching();
                     return;
                 }
                 if (isRuntimeTransientError(err)) return;
@@ -574,8 +727,10 @@ const CFG = {
                 running = false;
             }
         };
-        const intervalId = setInterval(tick, CFG.cardPollMs);
-        tick();
+        const stopWatching = watchPageUpdates(tick, {
+            debounceMs: CFG.cardUpdateDebounceMs,
+            minGapMs: CFG.updateMinGapMs,
+        });
     };
     let currentProductDetector = null;
     const setCurrentProductDetector = (detector) => {
