@@ -72,6 +72,14 @@
     const safe = base.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").replace(/\s+/g, " ").trim();
     return safe || DEFAULT_DOWNLOAD_NAME;
   };
+  var DOWNLOAD_FILENAME_TOKEN_PARAM = "owb-download-name";
+  var pendingTextDownloadNames = /* @__PURE__ */ new Map();
+  var makeTextDownloadUrl = (text, token) => `data:text/plain;charset=utf-8,${encodeURIComponent(text)}#${DOWNLOAD_FILENAME_TOKEN_PARAM}=${token}`;
+  var getTextDownloadToken = (url) => {
+    const match = String(url || "").match(new RegExp(`#${DOWNLOAD_FILENAME_TOKEN_PARAM}=([^#]+)$`));
+    return match ? match[1] : "";
+  };
+  var getFilenameFromTextDownloadUrl = (url) => pendingTextDownloadNames.get(getTextDownloadToken(url)) || "";
   var asNumber = (value, fallback) => {
     const n = Number(value);
     return Number.isFinite(n) ? n : fallback;
@@ -119,15 +127,28 @@
   var handleDownloadText = async (message) => {
     const filename = sanitizeFilename(message.name);
     const text = String(message.text || "");
-    const url = `data:text/plain;charset=utf-8,${encodeURIComponent(text)}`;
-    const downloadId = await downloadFile({
-      url,
-      filename,
-      saveAs: false,
-      conflictAction: "uniquify"
-    });
-    return { ok: true, downloadId };
+    const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    pendingTextDownloadNames.set(token, filename);
+    setTimeout(() => pendingTextDownloadNames.delete(token), 6e4);
+    try {
+      const downloadId = await downloadFile({
+        url: makeTextDownloadUrl(text, token),
+        filename,
+        saveAs: false,
+        conflictAction: "uniquify"
+      });
+      return { ok: true, downloadId };
+    } catch (err) {
+      pendingTextDownloadNames.delete(token);
+      throw err;
+    }
   };
+  chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
+    const filename = getFilenameFromTextDownloadUrl(downloadItem.url);
+    if (!filename) return;
+    pendingTextDownloadNames.delete(getTextDownloadToken(downloadItem.url));
+    suggest({ filename, conflictAction: "uniquify" });
+  });
   var handleJsonRequest = async (message) => {
     const method = String(message.method || "GET").toUpperCase();
     const url = String(message.url || "").trim();

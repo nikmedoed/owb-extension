@@ -72,6 +72,16 @@ const sanitizeFilename = (name) => {
     const safe = base.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/\s+/g, ' ').trim();
     return safe || DEFAULT_DOWNLOAD_NAME;
 };
+const DOWNLOAD_FILENAME_TOKEN_PARAM = 'owb-download-name';
+const pendingTextDownloadNames = new Map();
+const makeTextDownloadUrl = (text, token) => (
+    `data:text/plain;charset=utf-8,${encodeURIComponent(text)}#${DOWNLOAD_FILENAME_TOKEN_PARAM}=${token}`
+);
+const getTextDownloadToken = (url) => {
+    const match = String(url || '').match(new RegExp(`#${DOWNLOAD_FILENAME_TOKEN_PARAM}=([^#]+)$`));
+    return match ? match[1] : '';
+};
+const getFilenameFromTextDownloadUrl = (url) => pendingTextDownloadNames.get(getTextDownloadToken(url)) || '';
 const asNumber = (value, fallback) => {
     const n = Number(value);
     return Number.isFinite(n) ? n : fallback;
@@ -122,15 +132,32 @@ const downloadFile = (options) => new Promise((resolve, reject) => {
 const handleDownloadText = async (message) => {
     const filename = sanitizeFilename(message.name);
     const text = String(message.text || '');
-    const url = `data:text/plain;charset=utf-8,${encodeURIComponent(text)}`;
-    const downloadId = await downloadFile({
-        url,
-        filename,
-        saveAs: false,
-        conflictAction: 'uniquify',
-    });
-    return { ok: true, downloadId };
+    const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    pendingTextDownloadNames.set(token, filename);
+    setTimeout(() => pendingTextDownloadNames.delete(token), 60000);
+    try {
+        const downloadId = await downloadFile({
+            url: makeTextDownloadUrl(text, token),
+            filename,
+            saveAs: false,
+            conflictAction: 'uniquify',
+        });
+        return { ok: true, downloadId };
+    } catch (err) {
+        pendingTextDownloadNames.delete(token);
+        throw err;
+    }
 };
+
+// Some Chromium versions derive "download" from a data: URL. The fragment
+// does not become part of the file contents, and lets us match the request at
+// the final naming stage without changing the MIME type.
+chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
+    const filename = getFilenameFromTextDownloadUrl(downloadItem.url);
+    if (!filename) return;
+    pendingTextDownloadNames.delete(getTextDownloadToken(downloadItem.url));
+    suggest({ filename, conflictAction: 'uniquify' });
+});
 
 const handleJsonRequest = async (message) => {
     const method = String(message.method || 'GET').toUpperCase();

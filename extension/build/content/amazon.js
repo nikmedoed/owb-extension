@@ -118,33 +118,20 @@
     MP.downloadTextFile = (name, text) => {
       const bom = "\uFEFF";
       const payloadText = `${bom}${text || ""}`;
-      const fallback = () => {
-        try {
-          const blob = new Blob([payloadText], { type: "text/plain;charset=utf-8" });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement("a");
-          a.href = url;
-          a.download = name || "export.txt";
-          a.rel = "noopener";
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-          setTimeout(() => URL.revokeObjectURL(url), 1500);
-        } catch (err) {
-          console.warn("Download fallback failed:", err);
-        }
-      };
-      if (!hasRuntime()) {
-        fallback();
-        return;
+      try {
+        const blob = new Blob([payloadText], { type: "text/plain;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name || "export.txt";
+        a.rel = "noopener";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1500);
+      } catch (err) {
+        console.warn("Download failed:", err);
       }
-      sendRuntimeMessage({
-        type: "owb:download-text",
-        name: name || "export.txt",
-        text: payloadText
-      }).then((res) => {
-        if (!res || !res.ok) fallback();
-      }).catch(() => fallback());
     };
     MP.requestJson = async (method, base, path, body, timeout = 2500) => {
       const url = `${base}${path}`;
@@ -1076,21 +1063,26 @@
         )
       ]).filter((node) => isVisibleNode(node));
       for (const button of buttons.slice(0, 300)) {
-        button.scrollIntoView({ block: "center", inline: "nearest" });
-        await sleep(60);
         clickAmazonNode(button);
       }
       if (buttons.length) await sleep(300);
     };
-    const waitForAmazonReviewsCount = async (previousCount, timeoutMs = 15e3) => {
-      const started = Date.now();
-      while (Date.now() - started < timeoutMs) {
-        const count = getAmazonReviewNodes().length;
-        if (count > previousCount) return count;
-        await sleep(250);
-      }
-      return getAmazonReviewNodes().length;
-    };
+    const waitForAmazonReviewsCount = (previousCount, timeoutMs = 5e3) => new Promise((resolve) => {
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        observer.disconnect();
+        clearTimeout(timer);
+        resolve(getAmazonReviewNodes().length);
+      };
+      const observer = new MutationObserver(() => {
+        if (getAmazonReviewNodes().length > previousCount) finish();
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      const timer = setTimeout(finish, timeoutMs);
+      if (getAmazonReviewNodes().length > previousCount) finish();
+    });
     const loadAmazonReviewsByClicking = async (limit) => {
       if (!isAmazonReviewsRoute()) return false;
       let stagnantRounds = 0;
@@ -1109,7 +1101,7 @@
         const after = await waitForAmazonReviewsCount(before);
         if (after <= before) {
           stagnantRounds += 1;
-          if (stagnantRounds >= 2) break;
+          if (stagnantRounds >= 1) break;
         } else {
           stagnantRounds = 0;
         }
@@ -1127,7 +1119,8 @@
         items.push(...collectAmazonReviewsFromDocument(document, 0, seen));
       }
       const parser = new DOMParser();
-      for (let page = 1; items.length < limit && page <= 30; page += 1) {
+      const firstPage = Math.max(1, Math.floor(items.length / 10));
+      for (let page = firstPage; items.length < limit && page <= 30; page += 1) {
         const url = buildAmazonReviewsUrl(asin, page);
         if (!url) break;
         try {
@@ -1135,10 +1128,9 @@
           if (!response.ok) break;
           const html = await response.text();
           const doc = parser.parseFromString(html, "text/html");
-          const before = items.length;
           items.push(...collectAmazonReviewsFromDocument(doc, items.length, seen));
           const hasNext = !!(doc.querySelector("li.a-last a, .a-pagination .a-last a") || getAmazonShowMoreButton(doc));
-          if (items.length === before || !hasNext) break;
+          if (!hasNext) break;
         } catch (_) {
           break;
         }
