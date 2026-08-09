@@ -1151,7 +1151,6 @@ ${shown.join("\n")}`;
         await sleep(160);
         if (switchToVariant) {
           const switched = await clickVariantWhenReady();
-          if (!switched) console.warn("[OWB] Ozon variant reviews switch button was not found");
           await sleep(switched ? 240 : 80);
         }
         reviewSection = resolveReviewSection(reviewSection) || reviewSection;
