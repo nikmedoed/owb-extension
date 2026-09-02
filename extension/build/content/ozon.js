@@ -666,6 +666,7 @@
       ensureScrollTopButton();
       const clickVariantWhenReady = async (timeout = 2500) => {
         const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+        const interactiveSelector = 'button,[role="button"],a,[tabindex]';
         const isVisible = (el) => {
           if (!el || !el.isConnected || el.disabled || el.getAttribute("aria-disabled") === "true") return false;
           const rect = el.getBoundingClientRect();
@@ -680,18 +681,22 @@
           ].join(" ").toLowerCase();
           return /\b(true|selected|active|checked|current)\b/.test(raw);
         };
-        const find = () => [...document.querySelectorAll('button,[role="button"],a')].map((el) => {
-          const text = normalize(el.innerText || el.textContent || el.getAttribute?.("aria-label") || "");
-          return { el, text };
-        }).filter(({ el, text }) => {
-          if (!text || !isVisible(el) || isSelected(el)) return false;
-          if (!/(отзыв|review|вариант)/i.test(text)) return false;
-          return /(?:этот|данный|текущ)\s+вариант|только\s+(?:этот|данный|текущ)|this\s+variant/i.test(text);
-        }).sort((a, b) => {
-          const aExact = /этот вариант товара|только этот вариант/i.test(a.text) ? 0 : 1;
-          const bExact = /этот вариант товара|только этот вариант/i.test(b.text) ? 0 : 1;
-          return aExact - bExact;
-        })[0]?.el || null;
+        const find = () => {
+          const widget = document.querySelector('[data-widget="webReviewsVariantMode"]');
+          const root = widget || document;
+          return [...root.querySelectorAll(interactiveSelector)].map((el) => {
+            const text = normalize(el.innerText || el.textContent || el.getAttribute?.("aria-label") || "");
+            return { el, text };
+          }).filter(({ el, text }) => {
+            if (!text || !isVisible(el) || isSelected(el)) return false;
+            if (!/(отзыв|review|вариант)/i.test(text)) return false;
+            return /(?:этот|данный|текущ)\s+вариант|только\s+(?:этот|данный|текущ)|this\s+variant/i.test(text);
+          }).sort((a, b) => {
+            const aExact = /этот вариант товара|только этот вариант/i.test(a.text) ? 0 : 1;
+            const bExact = /этот вариант товара|только этот вариант/i.test(b.text) ? 0 : 1;
+            return aExact - bExact;
+          })[0]?.el || null;
+        };
         const clickNode = async (node) => {
           if (!node) return false;
           try {
@@ -699,18 +704,13 @@
           } catch (_) {
           }
           await sleep(80);
-          const targets = [
-            node,
-            node.querySelector?.('button,[role="button"],a'),
-            node.closest?.('button,[role="button"],a')
-          ].filter(Boolean);
-          for (const target of [...new Set(targets)]) {
-            try {
-              target.click();
-            } catch (_) {
-            }
-            await sleep(80);
+          const target = node.matches?.(interactiveSelector) ? node : node.closest?.(interactiveSelector) || node.querySelector?.(interactiveSelector) || node;
+          try {
+            target.click();
+          } catch (_) {
+            return false;
           }
+          await sleep(80);
           return true;
         };
         const started = Date.now();
