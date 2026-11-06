@@ -784,6 +784,28 @@
       const priceArea = getPriceArea();
       return priceArea?.querySelector?.('[data-testid="RedProductDelivery"]') || document.querySelector('[data-testid="RedProductDelivery"]') || [...document.querySelectorAll("div, section, span, p")].filter((node) => /delivery|shipping|достав/i.test(clean(node.textContent || ""))).sort((a, b) => clean(a.textContent || "").length - clean(b.textContent || "").length)[0] || null;
     };
+    const getUpcomingPrice = (defaultCurrency = "") => {
+      const root = getPriceRoot();
+      const priceBlock = root?.closest('[data-testid="HazeProductPrice"]') || root;
+      const candidates = [...priceBlock?.querySelectorAll('[class*="SnowPrice__isWarmUp__"]') || []];
+      const isHidden = (node) => {
+        for (let current = node; current; current = current.parentElement) {
+          if (current.hidden || current.style?.display === "none") return true;
+          if (current === priceBlock) break;
+        }
+        return false;
+      };
+      for (const node of candidates.filter((item) => !isHidden(item))) {
+        const priceNode = node.querySelector('[class*="SnowPrice__secondPrice__"]');
+        const price = parseMoneyLeaf(priceNode, defaultCurrency);
+        if (!price || price.price <= 0) continue;
+        return {
+          ...price,
+          startsIn: clean(node.querySelector('[class*="SnowPrice__discountTime__"]')?.textContent || "")
+        };
+      }
+      return null;
+    };
     const getPagePriceBreakdown = () => {
       const priceRoot = getPriceRoot();
       const product = parsePriceFromRoot(priceRoot, "", { allowGeneric: false }) || parsePriceFromRoot(priceRoot, "", { allowGeneric: true });
@@ -1231,6 +1253,37 @@
         images: [...new Set(images)]
       };
     };
+    const collectSkuVariants = () => {
+      const groups = [...document.querySelectorAll(
+        '[data-spm="sku_floor"] [class*="SkuPropertyItem__skuProp"], .sku-item, [class*="sku-item--property"]'
+      )];
+      const selected = [];
+      const lines = [];
+      for (const [groupIndex, group] of groups.entries()) {
+        const header = group.querySelector('[class*="propNameWrap"], .sku-title, [class*="sku-item--title"]');
+        const labels = [...header?.querySelectorAll('[class*="__propName__"]') || []];
+        const headerText = clean(header?.textContent || "");
+        const name = clean(labels[0]?.textContent || headerText.split(/[:：]/)[0]).replace(/[:：\s]+$/, "") || `\u041F\u0430\u0440\u0430\u043C\u0435\u0442\u0440 ${groupIndex + 1}`;
+        const headerValue = clean(labels.slice(1).map((node) => node.textContent).join(" ") || headerText.match(/[:：]\s*(.+)$/)?.[1] || "");
+        const options = [...group.querySelectorAll(
+          '[data-testid="skuProp"], .sku-property-item, [class*="sku-item--image"], [class*="sku-item--text"]'
+        )];
+        if (!options.length) continue;
+        let selectedValue = "";
+        const variants = options.map((option, index) => {
+          const active = /optionActive|(?:^|\s)selected(?:\s|$)|sku-item--selected/.test(option.className || "") || option.getAttribute("aria-pressed") === "true" || option.getAttribute("aria-selected") === "true";
+          const image = option.querySelector("img");
+          const label = clean(option.getAttribute("title") || option.getAttribute("aria-label") || image?.getAttribute("alt") || option.textContent || "") || (active ? headerValue : "") || `\u0412\u0430\u0440\u0438\u0430\u043D\u0442 ${index + 1}`;
+          const imageUrl = image?.getAttribute("src") || image?.getAttribute("data-src") || "";
+          const unavailable = option.disabled || option.getAttribute("aria-disabled") === "true" || /optionDisabled|(?:^|\s)disabled(?:\s|$)|sku-item--disabled/.test(option.className || "");
+          if (active) selectedValue = headerValue || label;
+          return `- ${label}${active ? " [\u0412\u042B\u0411\u0420\u0410\u041D\u041E]" : ""}${unavailable ? " [\u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D]" : ""}${imageUrl ? ` \u2014 ${imageUrl}` : ""}`;
+        });
+        selected.push(`${name}: ${selectedValue || headerValue || "\u043D\u0435 \u0432\u044B\u0431\u0440\u0430\u043D"}`);
+        lines.push(`${name}:`, ...variants);
+      }
+      return { selected: selected.join("; "), lines };
+    };
     const collectSpecs = () => {
       const root = document.querySelector("#characteristics_anchor");
       if (!root) return "\u2014";
@@ -1266,8 +1319,10 @@
       const store = getStore();
       const rating = getRatingInfo();
       const priceInfo = getPagePriceBreakdown();
+      const upcomingPrice = getUpcomingPrice(priceInfo.product?.currency || "");
       const description = collectDescription();
       const chars = collectSpecs();
+      const sku = collectSkuVariants();
       const pid = getAliProductId();
       const lines = [
         "=== CARD SUMMARY (ALIEXPRESS) ===",
@@ -1275,7 +1330,9 @@
         `\u041C\u0430\u0433\u0430\u0437\u0438\u043D: ${store.name}`,
         store.url ? `\u0421\u0441\u044B\u043B\u043A\u0430 \u043C\u0430\u0433\u0430\u0437\u0438\u043D\u0430: ${store.url}` : "",
         `\u0417\u0430\u0433\u043E\u043B\u043E\u0432\u043E\u043A: ${title}`,
+        sku.selected ? `\u0412\u044B\u0431\u0440\u0430\u043D\u043D\u044B\u0439 SKU: ${sku.selected}` : "",
         `\u0426\u0435\u043D\u0430 \u0442\u043E\u0432\u0430\u0440\u0430: ${formatPrice(priceInfo.product)}`,
+        upcomingPrice ? `\u0421\u043A\u043E\u0440\u043E \u0446\u0435\u043D\u0430 \u0442\u043E\u0432\u0430\u0440\u0430: ${formatPrice(upcomingPrice)}${upcomingPrice.startsIn ? ` (${upcomingPrice.startsIn})` : ""}` : "",
         `\u0414\u043E\u0441\u0442\u0430\u0432\u043A\u0430: ${formatPrice(priceInfo.delivery)}`,
         `\u0421\u0443\u043C\u043C\u0430 \u0441 \u0434\u043E\u0441\u0442\u0430\u0432\u043A\u043E\u0439: ${formatPrice(priceInfo.total)}`,
         `\u0420\u0435\u0439\u0442\u0438\u043D\u0433: ${rating.rating} (${rating.reviews} \u043E\u0442\u0437\u044B\u0432\u043E\u0432)`,
@@ -1286,6 +1343,9 @@
       ].filter((line) => line !== "");
       if (description.images.length) {
         lines.push("", "=== \u0418\u0417\u041E\u0411\u0420\u0410\u0416\u0415\u041D\u0418\u042F \u041E\u041F\u0418\u0421\u0410\u041D\u0418\u042F ===", ...description.images.map((src) => `- ${src}`));
+      }
+      if (sku.lines.length) {
+        lines.push("", "=== \u0412\u0410\u0420\u0418\u0410\u041D\u0422\u042B \u0422\u041E\u0412\u0410\u0420\u0410 (SKU) ===", ...sku.lines);
       }
       lines.push("", "=== \u0425\u0410\u0420\u0410\u041A\u0422\u0415\u0420\u0418\u0421\u0422\u0418\u041A\u0418 ===", ...toBullets(chars));
       if (includeReviews) {
@@ -2185,33 +2245,7 @@
       }
       return anchor;
     };
-    const hashSkuSignature = (value) => {
-      let hash = 5381;
-      const text = String(value || "");
-      for (let i = 0; i < text.length; i += 1) {
-        hash = (hash << 5) + hash ^ text.charCodeAt(i);
-      }
-      return (hash >>> 0).toString(36);
-    };
-    const getSelectedSkuSignature = () => {
-      const skuRoot = document.querySelector('[style*="--area:sku"] [data-spm="sku_floor"], [data-spm="sku_floor"]');
-      if (!skuRoot) return "";
-      const parts = [...skuRoot.querySelectorAll('[class*="SkuPropertyItem__skuProp"]')].map((prop, index) => {
-        const labels = [...prop.querySelectorAll('[class*="SkuPropertyItem__propName"]')].map((node) => clean(node.textContent || "").replace(/:$/, "")).filter(Boolean);
-        const name = labels[0] || `prop${index + 1}`;
-        const selected = labels.slice(1).join(" ") || clean(prop.querySelector('[data-testid="skuProp"][class*="optionActive"]')?.textContent || "");
-        const active = prop.querySelector('[data-testid="skuProp"][class*="optionActive"]');
-        const image = active?.querySelector?.("img")?.getAttribute("src") || "";
-        const activeIndex = active ? [...prop.querySelectorAll('[data-testid="skuProp"]')].indexOf(active) : -1;
-        return [name, selected, image, activeIndex].filter((item) => item !== "" && item !== -1).join("=");
-      }).filter(Boolean);
-      return parts.length ? parts.join("|") : "";
-    };
-    const getPidKey = (pid = getPid()) => {
-      if (!pid) return "";
-      const skuSignature = getSelectedSkuSignature();
-      return skuSignature ? `aliexpress:${pid}:sku:${hashSkuSignature(skuSignature)}` : `aliexpress:${pid}`;
-    };
+    const getPidKey = (pid = getPid()) => pid ? `aliexpress:${pid}` : "";
     const parsePriceFromExpAttribute = (root) => {
       const raw = root?.getAttribute?.("exp_attribute") || "";
       if (!raw) return null;

@@ -239,7 +239,12 @@
 
             const url = location.href;
             const heading = await wait('[data-widget="webProductHeading"]', 12000).catch(() => null);
-            const title = heading?.querySelector('h1')?.innerText.trim() || document.querySelector('h1')?.innerText.trim() || '—';
+            const titleNode = heading?.querySelector('h1') || document.querySelector('h1');
+            const title = [
+                titleNode?.innerText,
+                titleNode?.textContent,
+                document.querySelector('meta[property="og:title"]')?.content,
+            ].map((value) => String(value || '').replace(/\s+/g, ' ').trim()).find(Boolean) || '—';
 
             const normalizeQuotes = (value) => String(value || '')
                 .replace(/[`´‘’‛ʼʻʹʽꞌ＇]/g, "'")

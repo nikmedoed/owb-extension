@@ -858,7 +858,12 @@
         await sleep(180);
         const url = location.href;
         const heading = await wait('[data-widget="webProductHeading"]', 12e3).catch(() => null);
-        const title = heading?.querySelector("h1")?.innerText.trim() || document.querySelector("h1")?.innerText.trim() || "\u2014";
+        const titleNode = heading?.querySelector("h1") || document.querySelector("h1");
+        const title = [
+          titleNode?.innerText,
+          titleNode?.textContent,
+          document.querySelector('meta[property="og:title"]')?.content
+        ].map((value) => String(value || "").replace(/\s+/g, " ").trim()).find(Boolean) || "\u2014";
         const normalizeQuotes = (value) => String(value || "").replace(/[`´‘’‛ʼʻʹʽꞌ＇]/g, "'").replace(/[“”„«»]/g, '"');
         const clean = (value) => normalizeQuotes(value).replace(/\s+/g, " ").trim();
         const normalizeForCompare = (value) => clean(value).toLowerCase().replace(/['"]/g, "").replace(/[^a-zа-яё0-9]+/gi, " ").trim();

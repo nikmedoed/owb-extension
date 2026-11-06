@@ -65,37 +65,9 @@
         }
         return anchor;
     };
-    const hashSkuSignature = (value) => {
-        let hash = 5381;
-        const text = String(value || '');
-        for (let i = 0; i < text.length; i += 1) {
-            hash = ((hash << 5) + hash) ^ text.charCodeAt(i);
-        }
-        return (hash >>> 0).toString(36);
-    };
-    const getSelectedSkuSignature = () => {
-        const skuRoot = document.querySelector('[style*="--area:sku"] [data-spm="sku_floor"], [data-spm="sku_floor"]');
-        if (!skuRoot) return '';
-        const parts = [...skuRoot.querySelectorAll('[class*="SkuPropertyItem__skuProp"]')]
-            .map((prop, index) => {
-                const labels = [...prop.querySelectorAll('[class*="SkuPropertyItem__propName"]')]
-                    .map((node) => clean(node.textContent || '').replace(/:$/, ''))
-                    .filter(Boolean);
-                const name = labels[0] || `prop${index + 1}`;
-                const selected = labels.slice(1).join(' ') || clean(prop.querySelector('[data-testid="skuProp"][class*="optionActive"]')?.textContent || '');
-                const active = prop.querySelector('[data-testid="skuProp"][class*="optionActive"]');
-                const image = active?.querySelector?.('img')?.getAttribute('src') || '';
-                const activeIndex = active ? [...prop.querySelectorAll('[data-testid="skuProp"]')].indexOf(active) : -1;
-                return [name, selected, image, activeIndex].filter((item) => item !== '' && item !== -1).join('=');
-            })
-            .filter(Boolean);
-        return parts.length ? parts.join('|') : '';
-    };
-    const getPidKey = (pid = getPid()) => {
-        if (!pid) return '';
-        const skuSignature = getSelectedSkuSignature();
-        return skuSignature ? `aliexpress:${pid}:sku:${hashSkuSignature(skuSignature)}` : `aliexpress:${pid}`;
-    };
+    // Use the same stable item identity as catalog cards. SKU labels, image URLs
+    // and option order are presentation details and can change between visits.
+    const getPidKey = (pid = getPid()) => pid ? `aliexpress:${pid}` : '';
     const parsePriceFromExpAttribute = (root) => {
         const raw = root?.getAttribute?.('exp_attribute') || '';
         if (!raw) return null;

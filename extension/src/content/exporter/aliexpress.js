@@ -165,6 +165,29 @@
                 .sort((a, b) => clean(a.textContent || '').length - clean(b.textContent || '').length)[0]
             || null;
     };
+    const getUpcomingPrice = (defaultCurrency = '') => {
+        const root = getPriceRoot();
+        const priceBlock = root?.closest('[data-testid="HazeProductPrice"]') || root;
+        const candidates = [...(priceBlock?.querySelectorAll('[class*="SnowPrice__isWarmUp__"]') || [])];
+        // AliExpress renders desktop and mobile copies; prefer the visible copy.
+        const isHidden = (node) => {
+            for (let current = node; current; current = current.parentElement) {
+                if (current.hidden || current.style?.display === 'none') return true;
+                if (current === priceBlock) break;
+            }
+            return false;
+        };
+        for (const node of candidates.filter((item) => !isHidden(item))) {
+            const priceNode = node.querySelector('[class*="SnowPrice__secondPrice__"]');
+            const price = parseMoneyLeaf(priceNode, defaultCurrency);
+            if (!price || price.price <= 0) continue;
+            return {
+                ...price,
+                startsIn: clean(node.querySelector('[class*="SnowPrice__discountTime__"]')?.textContent || ''),
+            };
+        }
+        return null;
+    };
     const getPagePriceBreakdown = () => {
         const priceRoot = getPriceRoot();
         const product = parsePriceFromRoot(priceRoot, '', { allowGeneric: false })
@@ -613,6 +636,44 @@
             images: [...new Set(images)],
         };
     };
+    const collectSkuVariants = () => {
+        const groups = [...document.querySelectorAll(
+            '[data-spm="sku_floor"] [class*="SkuPropertyItem__skuProp"], .sku-item, [class*="sku-item--property"]'
+        )];
+        const selected = [];
+        const lines = [];
+        for (const [groupIndex, group] of groups.entries()) {
+            const header = group.querySelector('[class*="propNameWrap"], .sku-title, [class*="sku-item--title"]');
+            const labels = [...(header?.querySelectorAll('[class*="__propName__"]') || [])];
+            const headerText = clean(header?.textContent || '');
+            const name = clean(labels[0]?.textContent || headerText.split(/[:：]/)[0])
+                .replace(/[:：\s]+$/, '') || `Параметр ${groupIndex + 1}`;
+            const headerValue = clean(labels.slice(1).map((node) => node.textContent).join(' ')
+                || headerText.match(/[:：]\s*(.+)$/)?.[1] || '');
+            const options = [...group.querySelectorAll(
+                '[data-testid="skuProp"], .sku-property-item, [class*="sku-item--image"], [class*="sku-item--text"]'
+            )];
+            if (!options.length) continue;
+            let selectedValue = '';
+            const variants = options.map((option, index) => {
+                const active = /optionActive|(?:^|\s)selected(?:\s|$)|sku-item--selected/.test(option.className || '')
+                    || option.getAttribute('aria-pressed') === 'true'
+                    || option.getAttribute('aria-selected') === 'true';
+                const image = option.querySelector('img');
+                const label = clean(option.getAttribute('title') || option.getAttribute('aria-label')
+                    || image?.getAttribute('alt') || option.textContent || '')
+                    || (active ? headerValue : '') || `Вариант ${index + 1}`;
+                const imageUrl = image?.getAttribute('src') || image?.getAttribute('data-src') || '';
+                const unavailable = option.disabled || option.getAttribute('aria-disabled') === 'true'
+                    || /optionDisabled|(?:^|\s)disabled(?:\s|$)|sku-item--disabled/.test(option.className || '');
+                if (active) selectedValue = headerValue || label;
+                return `- ${label}${active ? ' [ВЫБРАНО]' : ''}${unavailable ? ' [недоступен]' : ''}${imageUrl ? ` — ${imageUrl}` : ''}`;
+            });
+            selected.push(`${name}: ${selectedValue || headerValue || 'не выбран'}`);
+            lines.push(`${name}:`, ...variants);
+        }
+        return { selected: selected.join('; '), lines };
+    };
     const collectSpecs = () => {
         const root = document.querySelector('#characteristics_anchor');
         if (!root) return '—';
@@ -649,8 +710,10 @@
         const store = getStore();
         const rating = getRatingInfo();
         const priceInfo = getPagePriceBreakdown();
+        const upcomingPrice = getUpcomingPrice(priceInfo.product?.currency || '');
         const description = collectDescription();
         const chars = collectSpecs();
+        const sku = collectSkuVariants();
         const pid = getAliProductId();
 
         const lines = [
@@ -659,7 +722,9 @@
             `Магазин: ${store.name}`,
             store.url ? `Ссылка магазина: ${store.url}` : '',
             `Заголовок: ${title}`,
+            sku.selected ? `Выбранный SKU: ${sku.selected}` : '',
             `Цена товара: ${formatPrice(priceInfo.product)}`,
+            upcomingPrice ? `Скоро цена товара: ${formatPrice(upcomingPrice)}${upcomingPrice.startsIn ? ` (${upcomingPrice.startsIn})` : ''}` : '',
             `Доставка: ${formatPrice(priceInfo.delivery)}`,
             `Сумма с доставкой: ${formatPrice(priceInfo.total)}`,
             `Рейтинг: ${rating.rating} (${rating.reviews} отзывов)`,
@@ -670,6 +735,9 @@
         ].filter((line) => line !== '');
         if (description.images.length) {
             lines.push('', '=== ИЗОБРАЖЕНИЯ ОПИСАНИЯ ===', ...description.images.map((src) => `- ${src}`));
+        }
+        if (sku.lines.length) {
+            lines.push('', '=== ВАРИАНТЫ ТОВАРА (SKU) ===', ...sku.lines);
         }
         lines.push('', '=== ХАРАКТЕРИСТИКИ ===', ...toBullets(chars));
 

@@ -417,6 +417,37 @@
       products: dirtyStates.size
     };
   };
+  var restoreAliExpressItemHistory = async (pidKeys) => {
+    const keys = [...new Set(pidKeys)].filter((key) => /^aliexpress:\d{8,}$/.test(key));
+    if (!keys.length) return;
+    const db = await openPriceDb();
+    const tx = db.transaction([PRICE_DB.intervals, PRICE_DB.products], "readwrite");
+    const intervals = tx.objectStore(PRICE_DB.intervals);
+    const products = tx.objectStore(PRICE_DB.products);
+    const changed = /* @__PURE__ */ new Set();
+    await Promise.all(keys.map((pidKey) => new Promise((resolve, reject) => {
+      const prefix = `${pidKey}:sku:`;
+      const range = IDBKeyRange.bound([prefix, 0], [`${prefix}\uFFFF`, Number.MAX_SAFE_INTEGER]);
+      const req = intervals.index("byPidFirst").openCursor(range);
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) {
+          resolve();
+          return;
+        }
+        const row = cursor.value;
+        if (new RegExp(`^${prefix}[a-z0-9]+$`).test(row.pidKey)) {
+          products.delete(row.pidKey);
+          cursor.update({ ...row, pidKey, updatedAt: now() });
+          changed.add(pidKey);
+        }
+        cursor.continue();
+      };
+      req.onerror = () => reject(req.error);
+    })));
+    await txDone(tx);
+    if (changed.size) await rebuildProductSummaries([...changed]);
+  };
   var getIntervalsByPid = async (pidKey, limit = 2e3) => {
     const cleanPidKey = String(pidKey || "").trim();
     if (!cleanPidKey) return [];
@@ -494,6 +525,7 @@
   var getMinBatch = async (pidKeys, preferredCurrencies = {}) => {
     const keys = [...new Set((Array.isArray(pidKeys) ? pidKeys : []).map((k) => String(k || "").trim()).filter(Boolean))];
     if (!keys.length) return {};
+    await restoreAliExpressItemHistory(keys);
     await ensureProductSummaries(keys);
     const db = await openPriceDb();
     const tx = db.transaction(PRICE_DB.products, "readonly");
@@ -1701,6 +1733,7 @@
         if (fetched.ok) SYNC_STATE.historyFetchedAt.set(cleanPidKey, now());
       }
     }
+    await restoreAliExpressItemHistory([cleanPidKey]);
     const intervals = await getIntervalsByPid(cleanPidKey, limit);
     return filterIntervalsForUsage(intervals, cleanPidKey, preferredCurrency);
   };
