@@ -320,6 +320,7 @@
     const intervalCache = /* @__PURE__ */ new Map();
     const dirtyStates = /* @__PURE__ */ new Set();
     const dirtyIntervals = /* @__PURE__ */ new Set();
+    const rebuildStates = /* @__PURE__ */ new Set();
     let created = 0;
     let touched = 0;
     const getState = async (pidKey) => {
@@ -343,6 +344,10 @@
         tailInterval = await getInterval(state.lastIntervalKey);
       }
       if (tailInterval) {
+        const market = resolveMarket(state.market, record.pidKey);
+        const entry = state.currencyMins?.[currencyBucketKey(record.currency)];
+        const canExtendSummary = (market === "aliexpress" || market === "ozon") && toInt(state.summaryVersion, 0) >= PRODUCT_SUMMARY_VERSION && entry;
+        if (!canExtendSummary) rebuildStates.add(record.pidKey);
         tailInterval.lastTs = Math.max(toInt(tailInterval.lastTs, record.ts), record.ts);
         tailInterval.updatedAt = touchedAt;
         intervalCache.set(tailInterval.key, tailInterval);
@@ -354,10 +359,21 @@
         if (state.minIntervalKey === tailInterval.key) {
           state.minLastTs = Math.max(toInt(state.minLastTs, tailInterval.lastTs), tailInterval.lastTs);
         }
+        if (canExtendSummary) {
+          entry.lastSeenTs = Math.max(toInt(entry.lastSeenTs, 0), tailInterval.lastTs);
+          if (eq(entry.price, record.price)) {
+            entry.lastTs = Math.max(toInt(entry.lastTs, 0), tailInterval.lastTs);
+            if (sameCurrency(state.minCurrency, record.currency) && eq(state.minPrice, record.price)) {
+              state.minLastTs = Math.max(toInt(state.minLastTs, 0), tailInterval.lastTs);
+            }
+          }
+          state.summaryUpdatedAt = touchedAt;
+        }
         stateCache.set(record.pidKey, state);
         dirtyStates.add(record.pidKey);
         continue;
       }
+      rebuildStates.add(record.pidKey);
       const key = makeIntervalKey(record);
       const interval = {
         key,
@@ -409,7 +425,7 @@
       if (state) productsStore.put(state);
     }
     await txDone(tx);
-    await rebuildProductSummaries([...dirtyStates]);
+    await rebuildProductSummaries([...rebuildStates]);
     return {
       captured: clean.length,
       created,
@@ -1741,9 +1757,11 @@
     const keys = [...new Set((Array.isArray(pidKeys) ? pidKeys : []).map((k) => String(k || "").trim()).filter(Boolean))];
     if (!keys.length) return {};
     const localMins = await getMinBatch(keys, preferredCurrencies);
+    let localDataChanged = false;
     const cfg = await loadSyncConfig();
     if (cfg.mode === "sync" && cfg.serverUrl) {
       await maybeAutoSync("min-request");
+      localDataChanged = true;
       const ts = now();
       const toFetch = keys.filter((pidKey) => {
         const local = localMins[pidKey];
@@ -1756,7 +1774,7 @@
         if (fetched.ok) toFetch.forEach((pidKey) => SYNC_STATE.minFetchedAt.set(pidKey, ts));
       }
     }
-    return getMinBatch(keys, preferredCurrencies);
+    return localDataChanged ? getMinBatch(keys, preferredCurrencies) : localMins;
   };
   var openPriceHistoryEditor = async (payload = {}) => {
     const pidKey = String(payload.pidKey || "").trim();

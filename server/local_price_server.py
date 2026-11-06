@@ -451,95 +451,98 @@ class PriceStore:
         return cur.fetchall()
 
     def upsert_interval(self, interval: PriceInterval) -> Dict[str, Any]:
-        with self.lock:
-            cur = self.conn.cursor()
-            update_ts = max(interval.updated_ts or 0, now_ms())
-            overlaps = self._find_overlaps_same_price(
+        with self.lock, self.conn:
+            return self._upsert_interval(interval)
+
+    def _upsert_interval(self, interval: PriceInterval) -> Dict[str, Any]:
+        # The caller owns the lock and transaction, including rollback on failure.
+        cur = self.conn.cursor()
+        update_ts = max(interval.updated_ts or 0, now_ms())
+        overlaps = self._find_overlaps_same_price(
+            cur,
+            interval.pid_key,
+            interval.price,
+            interval.currency,
+            interval.first_ts,
+            interval.last_ts,
+        )
+        status = "inserted"
+
+        if overlaps:
+            keep = overlaps[0]
+            keep_id = int(keep["id"])
+            merged_first = min([interval.first_ts] + [int(r["first_ts"]) for r in overlaps])
+            merged_last = max([interval.last_ts] + [int(r["last_ts"]) for r in overlaps])
+            merged_pid = interval.pid or (keep["pid"] or "")
+            cur.execute(
+                """
+                UPDATE price_intervals
+                SET pid=?, first_ts=?, last_ts=?, updated_ts=?
+                WHERE id=?
+                """,
+                (merged_pid, merged_first, merged_last, update_ts, keep_id),
+            )
+            remove_ids = [int(r["id"]) for r in overlaps[1:]]
+            if remove_ids:
+                cur.execute(
+                    f"DELETE FROM price_intervals WHERE id IN ({','.join('?' for _ in remove_ids)})",
+                    tuple(remove_ids),
+                )
+            status = "merged" if remove_ids or merged_first != int(keep["first_ts"]) or merged_last != int(keep["last_ts"]) else "updated"
+            row_id = keep_id
+        else:
+            cur.execute(
+                """
+                INSERT INTO price_intervals (
+                    pid_key, pid, price, currency, first_ts, last_ts, created_ts, updated_ts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    interval.pid_key,
+                    interval.pid,
+                    interval.price,
+                    interval.currency,
+                    interval.first_ts,
+                    interval.last_ts,
+                    update_ts,
+                    update_ts,
+                ),
+            )
+            row_id = int(cur.lastrowid)
+
+        # Chain-merge any newly touched intervals after widening.
+        while True:
+            base = self._get_by_id(cur, row_id)
+            chained = self._find_overlaps_same_price(
                 cur,
                 interval.pid_key,
                 interval.price,
                 interval.currency,
-                interval.first_ts,
-                interval.last_ts,
+                int(base["first_ts"]),
+                int(base["last_ts"]),
+                skip_id=row_id,
             )
-            status = "inserted"
+            if not chained:
+                break
+            next_first = min([int(base["first_ts"])] + [int(r["first_ts"]) for r in chained])
+            next_last = max([int(base["last_ts"])] + [int(r["last_ts"]) for r in chained])
+            next_pid = interval.pid or (base["pid"] or "")
+            cur.execute(
+                """
+                UPDATE price_intervals
+                SET pid=?, first_ts=?, last_ts=?, updated_ts=?
+                WHERE id=?
+                """,
+                (next_pid, next_first, next_last, update_ts, row_id),
+            )
+            del_ids = [int(r["id"]) for r in chained]
+            cur.execute(
+                f"DELETE FROM price_intervals WHERE id IN ({','.join('?' for _ in del_ids)})",
+                tuple(del_ids),
+            )
+            status = "merged"
 
-            if overlaps:
-                keep = overlaps[0]
-                keep_id = int(keep["id"])
-                merged_first = min([interval.first_ts] + [int(r["first_ts"]) for r in overlaps])
-                merged_last = max([interval.last_ts] + [int(r["last_ts"]) for r in overlaps])
-                merged_pid = interval.pid or (keep["pid"] or "")
-                cur.execute(
-                    """
-                    UPDATE price_intervals
-                    SET pid=?, first_ts=?, last_ts=?, updated_ts=?
-                    WHERE id=?
-                    """,
-                    (merged_pid, merged_first, merged_last, update_ts, keep_id),
-                )
-                remove_ids = [int(r["id"]) for r in overlaps[1:]]
-                if remove_ids:
-                    cur.execute(
-                        f"DELETE FROM price_intervals WHERE id IN ({','.join('?' for _ in remove_ids)})",
-                        tuple(remove_ids),
-                    )
-                status = "merged" if remove_ids or merged_first != int(keep["first_ts"]) or merged_last != int(keep["last_ts"]) else "updated"
-                row_id = keep_id
-            else:
-                cur.execute(
-                    """
-                    INSERT INTO price_intervals (
-                        pid_key, pid, price, currency, first_ts, last_ts, created_ts, updated_ts
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        interval.pid_key,
-                        interval.pid,
-                        interval.price,
-                        interval.currency,
-                        interval.first_ts,
-                        interval.last_ts,
-                        update_ts,
-                        update_ts,
-                    ),
-                )
-                row_id = int(cur.lastrowid)
-
-            # Chain-merge any newly touched intervals after widening.
-            while True:
-                base = self._get_by_id(cur, row_id)
-                chained = self._find_overlaps_same_price(
-                    cur,
-                    interval.pid_key,
-                    interval.price,
-                    interval.currency,
-                    int(base["first_ts"]),
-                    int(base["last_ts"]),
-                    skip_id=row_id,
-                )
-                if not chained:
-                    break
-                next_first = min([int(base["first_ts"])] + [int(r["first_ts"]) for r in chained])
-                next_last = max([int(base["last_ts"])] + [int(r["last_ts"]) for r in chained])
-                next_pid = interval.pid or (base["pid"] or "")
-                cur.execute(
-                    """
-                    UPDATE price_intervals
-                    SET pid=?, first_ts=?, last_ts=?, updated_ts=?
-                    WHERE id=?
-                    """,
-                    (next_pid, next_first, next_last, update_ts, row_id),
-                )
-                del_ids = [int(r["id"]) for r in chained]
-                cur.execute(
-                    f"DELETE FROM price_intervals WHERE id IN ({','.join('?' for _ in del_ids)})",
-                    tuple(del_ids),
-                )
-                status = "merged"
-
-            self.conn.commit()
-            return {"status": status, "interval": self._row_to_dict(self._get_by_id(cur, row_id))}
+        return {"status": status, "interval": self._row_to_dict(self._get_by_id(cur, row_id))}
 
     def upsert_many(self, items: Iterable[PriceInterval]) -> Dict[str, Any]:
         inserted = 0
@@ -547,17 +550,18 @@ class PriceStore:
         updated = 0
         accepted = 0
         out: List[Dict[str, Any]] = []
-        for interval in items:
-            result = self.upsert_interval(interval)
-            accepted += 1
-            status = result["status"]
-            if status == "inserted":
-                inserted += 1
-            elif status == "merged":
-                merged += 1
-            else:
-                updated += 1
-            out.append(result["interval"])
+        with self.lock, self.conn:
+            for interval in items:
+                result = self._upsert_interval(interval)
+                accepted += 1
+                status = result["status"]
+                if status == "inserted":
+                    inserted += 1
+                elif status == "merged":
+                    merged += 1
+                else:
+                    updated += 1
+                out.append(result["interval"])
         return {
             "accepted": accepted,
             "inserted": inserted,

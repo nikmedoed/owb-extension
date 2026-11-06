@@ -347,6 +347,7 @@ const capturePriceBatch = async (records) => {
     const intervalCache = new Map();
     const dirtyStates = new Set();
     const dirtyIntervals = new Set();
+    const rebuildStates = new Set();
     let created = 0;
     let touched = 0;
 
@@ -373,6 +374,15 @@ const capturePriceBatch = async (records) => {
         }
 
         if (tailInterval) {
+            // Extending the tail cannot change AliExpress/Ozon outlier decisions:
+            // those filters only inspect durations of interior intervals. WB uses
+            // neighbor durations and Amazon can filter the tail itself.
+            const market = resolveMarket(state.market, record.pidKey);
+            const entry = state.currencyMins?.[currencyBucketKey(record.currency)];
+            const canExtendSummary = (market === 'aliexpress' || market === 'ozon')
+                && toInt(state.summaryVersion, 0) >= PRODUCT_SUMMARY_VERSION
+                && entry;
+            if (!canExtendSummary) rebuildStates.add(record.pidKey);
             tailInterval.lastTs = Math.max(toInt(tailInterval.lastTs, record.ts), record.ts);
             tailInterval.updatedAt = touchedAt;
             intervalCache.set(tailInterval.key, tailInterval);
@@ -385,11 +395,22 @@ const capturePriceBatch = async (records) => {
             if (state.minIntervalKey === tailInterval.key) {
                 state.minLastTs = Math.max(toInt(state.minLastTs, tailInterval.lastTs), tailInterval.lastTs);
             }
+            if (canExtendSummary) {
+                entry.lastSeenTs = Math.max(toInt(entry.lastSeenTs, 0), tailInterval.lastTs);
+                if (eq(entry.price, record.price)) {
+                    entry.lastTs = Math.max(toInt(entry.lastTs, 0), tailInterval.lastTs);
+                    if (sameCurrency(state.minCurrency, record.currency) && eq(state.minPrice, record.price)) {
+                        state.minLastTs = Math.max(toInt(state.minLastTs, 0), tailInterval.lastTs);
+                    }
+                }
+                state.summaryUpdatedAt = touchedAt;
+            }
             stateCache.set(record.pidKey, state);
             dirtyStates.add(record.pidKey);
             continue;
         }
 
+        rebuildStates.add(record.pidKey);
         const key = makeIntervalKey(record);
         const interval = {
             key,
@@ -444,7 +465,7 @@ const capturePriceBatch = async (records) => {
     }
 
     await txDone(tx);
-    await rebuildProductSummaries([...dirtyStates]);
+    await rebuildProductSummaries([...rebuildStates]);
     return {
         captured: clean.length,
         created,
@@ -1906,9 +1927,12 @@ const getMergedMinBatch = async (pidKeys, preferredCurrencies = {}) => {
     if (!keys.length) return {};
 
     const localMins = await getMinBatch(keys, preferredCurrencies);
+    let localDataChanged = false;
     const cfg = await loadSyncConfig();
     if (cfg.mode === 'sync' && cfg.serverUrl) {
+        // Auto-sync can import intervals even when no explicit minimum fetch runs.
         await maybeAutoSync('min-request');
+        localDataChanged = true;
         const ts = now();
         const toFetch = keys.filter((pidKey) => {
             const local = localMins[pidKey];
@@ -1921,7 +1945,7 @@ const getMergedMinBatch = async (pidKeys, preferredCurrencies = {}) => {
             if (fetched.ok) toFetch.forEach((pidKey) => SYNC_STATE.minFetchedAt.set(pidKey, ts));
         }
     }
-    return getMinBatch(keys, preferredCurrencies);
+    return localDataChanged ? getMinBatch(keys, preferredCurrencies) : localMins;
 };
 
 const openPriceHistoryEditor = async (payload = {}) => {
